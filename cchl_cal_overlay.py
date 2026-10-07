@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tkinter as tk
+from overlay_updater import attach_update_menu
 import tkinter.font as tkfont
 import urllib.request
 
@@ -170,6 +171,7 @@ def fetch_two_day_schedule(ical_url):
 
 
 root = tk.Tk()
+update_menu = attach_update_menu(root, __file__)
 root.title("Calendar Overlay")
 
 # Remove window borders and force overlay above all applications

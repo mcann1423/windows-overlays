@@ -1,6 +1,7 @@
 import socket
 import sys
 import tkinter as tk
+from overlay_updater import attach_update_menu
 import tkinter.font as tkfont
 
 
@@ -26,6 +27,7 @@ TEXT_COLOR = "#E2E8F0"  # Main soft slate text color
 CORNER_MARGIN = 15  # Distance in pixels from screen edge
 
 root = tk.Tk()
+update_menu = attach_update_menu(root, __file__)
 root.title("IP Overlay")
 
 # Remove window borders and force overlay above all applications

@@ -2,6 +2,7 @@ import ctypes
 import os
 import sys
 import tkinter as tk
+from overlay_updater import attach_update_menu
 import tkinter.font as tkfont
 from time import strftime
 
@@ -57,6 +58,7 @@ OUTLINE_COLOR = "#0F172A"  # Dark slate stroke border
 FONT_FAMILY = resolve_font(FONT_FILE, TARGET_FONT, "Arial Rounded MT Bold")
 
 root = tk.Tk()
+update_menu = attach_update_menu(root, __file__)
 root.title("Clock Overlay")
 
 # Remove window borders and force overlay above all applications
