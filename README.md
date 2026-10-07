@@ -14,8 +14,7 @@ Drag an overlay to move it; hover to reveal its close button.
 Use Python 3 on Windows with Tcl/Tk and Tkinter installed (normally included
 with the standard Windows Python installer). All imports are from the Python
 standard library; no third-party Python packages are required. Keep the shared
-`overlay_updater.py` module beside all four scripts. Optional in-app updates
-require Git for Windows on PATH and existing private-repository authentication. Windows transparent-window attributes and the clock's Windows GDI
+`overlay_updater.py` module beside all four scripts. Optional in-app updates use public HTTPS downloads: no Git, gh, pip packages, or authentication is required. Windows transparent-window attributes and the clock's Windows GDI
 font registration mean these scripts are not intended to run unchanged on Linux.
 Calendar overlays need network access to their configured feeds. The IP overlay
 uses a UDP socket route lookup against 8.8.8.8:80 to select the local interface;
@@ -84,74 +83,95 @@ and ignored. Never force-add them or put real feed URLs in the example or
 source. Review exact staged files before every push. The updater never publishes or uploads local files.
 
 
+## Download and setup (no Git required)
+
+1. Open https://github.com/mcann1423/windows-overlays, choose **Code → Download
+   ZIP**, and extract to a writable folder. Do not run from inside the ZIP.
+   Keep the shared updater beside all four overlay scripts.
+2. Install standard Windows Python with Tkinter. Obtain fonts separately and
+   follow the working-directory/font instructions above.
+3. Copy the example config only if no real config exists, then enter your own
+   calendar URLs locally. Launch overlays using the commands above.
+
 ## Optional in-app updates (Windows only)
 
-We use the maintained [Git for Windows](https://gitforwindows.org/) and its
-[Git Credential Manager](https://github.com/git-ecosystem/git-credential-manager),
-not a custom downloader or token store. Git's built-in fetch and
-[fast-forward-only merge](https://git-scm.com/docs/git-merge) retain history and
-refuse divergent updates. No Python packages, GitHub CLI, or updater-specific
-credentials are needed on Windows.
+Right-click **visible text**, choose **Check for updates…**, and confirm the
+replacement warning. Transparent areas may pass clicks through. Nothing checks
+at startup or on a timer. Downloads and file operations run in a worker; Tk
+handles dialogs on its main thread. Leave the initiating window open to see the
+result. Closing it does not cancel the non-daemon worker.
 
-### First-time setup
+The updater resolves public GitHub main once, then fetches a tree and seven
+allowlisted files pinned to that immutable commit SHA: itself, the four overlays,
+README (current setup/recovery guidance), and the placeholder-only config example
+(setup reference). It never downloads tests, .gitignore, fonts, real config,
+legacy clocks, unknown files or .git. There is no ZIP extraction, authentication,
+subprocess, calendar access, or import/execution of fetched scripts.
 
-1. Install current Git for Windows with Git Credential Manager enabled and Git
-   available to command-line applications; reopen terminals/overlays afterward.
-2. In a Windows terminal, clone into a **new, empty folder**:
+Existing-solutions preflight: Git requires an unwanted end-user installation;
+third-party updater libraries add dependencies without benefit for seven flat
+files. Maintained standard-library urllib plus GitHub API/raw endpoints suffice.
+Downloads require trusted HTTPS hosts, reject redirects, use 15-second socket
+timeouts and a 45-second read budget per response (a blocking read may extend
+that by one socket timeout), and cap each response at 1 MiB. Files are checked
+against GitHub blob hashes, sizes, UTF-8 and expected syntax/content. These are
+consistency checks trusting HTTPS and the publisher, not independent signed
+release authenticity. Offline/404/rate-limit errors leave application files
+unchanged; wait and retry for rate limits, without signing in.
 
-   ```bat
-   git clone https://github.com/mcann1423/windows-overlays.git C:\path\to\windows-overlays
-   cd /d C:\path\to\windows-overlays
-   git fetch origin
-   ```
+### Local edits, backups and recovery
 
-   Complete Git Credential Manager's browser sign-in with a GitHub account that
-   has access to this private repository (including any organization approval).
-   Credentials stay in the user's Windows credential setup. Never put a token
-   in a URL, script, config, shortcut or repository. Do not copy Linux credentials.
-   An already configured GitHub SSH key/agent with a verified host key also works
-   with the exact `git@github.com:mcann1423/windows-overlays.git` origin.
-3. Copy your existing private `calendar_config.json` and separately licensed
-   fonts into the new folder yourself, without overwriting originals. Keep your
-   old folder as a backup. Point shortcuts at the new scripts and set **Start in**
-   to the new folder. Downloaded ZIPs and loose scripts cannot self-update.
-   Do not initialize/reset an existing mixed folder just to enable updates.
-4. If already using a clean clone from before the update menu was added, run
-   `git pull --ff-only origin main` once in its terminal, then restart overlays.
-   Stop if Git reports conflicts/local changes; preserve and resolve them manually.
+**First use has no installed baseline, even in a Git clone.** Confirmation
+explicitly authorizes replacing existing allowlisted files, including edits.
+Replaced bytes are backed up first in .overlay-update-backups/. Save valued
+customizations separately before confirming. Identical files need no replacement.
+A successful first check writes .overlay-update.json with installed hashes.
+Subsequent edits or missing managed files block updates, even when the published
+version is unchanged. Nothing silently merges/resets/discards baseline edits.
+To keep customizations, reconcile manually. To deliberately accept published
+versions after separately backing up edits, move metadata out of the folder and
+confirm first-use replacement again. Invalid metadata requires manual review.
 
-### Using it
+All downloads are verified before staging; staged files and backups are verified
+before replacement. Each replacement is atomic on the same filesystem; the
+whole set is **not** one atomic transaction. Ordinary install errors restore
+previous files and retain backups. Power loss, termination or failed rollback
+can leave mixed versions: do not launch/restart overlays until recovered. No
+rollback guarantee can survive disk failure.
 
-Right-click the **visible text** of any overlay, choose **Check for updates…**,
-then confirm. Transparent areas may pass mouse clicks to the desktop. The menu
-updates the shared checkout for all four overlays; left-drag and hover-close
-remain unchanged. Nothing checks at startup or on a timer. Git runs in a worker
-thread while Tk polls for its result; subprocesses have bounded timeouts and
-cannot prompt for passwords. If access fails, run `git fetch origin` in a terminal
-and fix authentication/network access before retrying.
+A folder-wide .overlay-update.lock serializes overlays. After interruption,
+close all overlays and confirm no updater remains. Inspect the newest backup's
+recovery.json: restore its listed replaced files from that backup (including
+old metadata), and remove only listed previously_absent files if now present.
+If no backup exists, or its recovery.json was never completed, no application replacement began. Keep backups until
+recovery is verified, then remove the stale lock and abandoned
+.overlay-update-stage-* directories. Incomplete rollback retains the lock.
+Never remove a live lock. Backups can contain private edits: never share them.
+Updater metadata, locks, staging and backups are ignored by the new .gitignore.
 
-Only the trusted GitHub repository's `main` branch is accepted; the remote's
-default branch must still be `main`. The updater refuses a dirty tracked tree,
-detached/wrong branch, local commits ahead/diverged, URL rewrites, Git operations
-in progress, hidden tracked-file flags, upstream protected paths, symlinks,
-submodules, or collisions with any ignored/untracked local files. Config, fonts
-and legacy clocks never become tracked via this updater. Local edits to styling
-in tracked scripts also block updates: back them up and reconcile manually.
-It never resets, cleans, stashes, force-pushes or stores credentials.
+**Restart ALL overlays manually after success.** Running processes retain their
+loaded code, including the old updater. Avoid editing, launching overlays or
+running Git during updates. Only cooperating updaters honor the lock; it does
+not protect against another program editing files or a hostile local user.
+Use a folder you control.
 
-**Restart all running overlays manually after success.** Only on-disk tracked
-files change; running applications retain their loaded code. Nothing kills or
-restarts another overlay. Avoid other Git commands or file edits while an update
-is running. The four updater instances serialize using a lock; if a process
-crashes, inspect Git status and confirm no update/Git process remains before
-removing `.git/overlay-update.lock`. Closing the initiating window does not cancel
-a worker already running; leave it open to see the result. On timeout/failure,
-inspect `git status` before retrying; never delete Git's own locks while it runs.
+### Migration from the Git updater
 
-### Tests
+Existing Git clients may run **git pull --ff-only origin main** once to obtain
+this updater. Stop and preserve local changes if Git refuses. Alternatively,
+download the ZIP and manually copy the seven managed files after backing up
+local edits; leave real config/fonts/legacy/unknown files untouched. Restart all
+overlays. Subsequent menu updates need no Git and leave Git HEAD/index alone:
+a clone may show tracked changes afterward. Do not blindly pull/reset it.
+If copying only the seven files into an old clone, manually merge the four
+updater ignore patterns from the new .gitignore before publishing anything;
+the downloader intentionally never edits .gitignore.
 
-From the repository root: `py -m unittest discover -s tests -v`. Tests use temporary
-local Git repositories and mocked GUI/network destinations. They do not launch
-overlays or access calendar feeds. Linux checks cover core Git safety and static
-compilation; native Windows transparency, right-click placement, credential-manager
-behavior and multi-overlay interaction still need a Windows GUI smoke test.
+### Tests and limitations
+
+Run **py -m unittest discover -s tests -v**. Tests use temporary ordinary folders,
+mocked HTTP and mocked Tk, not installed Git or real calendars. Linux tests and
+static compilation do not replace a native Windows GUI smoke test of menu
+placement, transparency, antivirus/file-sharing behavior and multiple overlays.
+Python syntax validation uses installed Python; future code requiring a newer
+Python will fail safely until Python is upgraded.

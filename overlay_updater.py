@@ -1,163 +1,296 @@
-"""Explicit, Windows-only updates using the user's existing Git installation.
-
-No credentials, downloads, startup checks, process restarts or calendar access.
-"""
+"""Manual public HTTPS updates; no Git, credentials, packages or script execution."""
+import ast
+from contextlib import contextmanager
+import hashlib
+import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import queue
+import re
 import shutil
-import subprocess
+import stat
 import sys
+import tempfile
 import threading
+import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import build_opener, HTTPRedirectHandler, Request
 
-ORIGIN = "https://github.com/mcann1423/windows-overlays.git"
-BRANCH = "main"  # Verified GitHub default branch; changes require a reviewed release.
-ALLOWED_ORIGINS = {ORIGIN, ORIGIN[:-4],
-                   "git@github.com:mcann1423/windows-overlays.git",
-                   "ssh://git@github.com/mcann1423/windows-overlays.git"}
-FONT_SUFFIXES = {".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2", ".fon",
-                 ".fnt", ".pfb", ".pfm", ".pfa", ".bdf", ".pcf", ".sfd", ".dfont"}
+REPOSITORY = "mcann1423/windows-overlays"
+API = "https://api.github.com/repos/" + REPOSITORY
+RAW = "https://raw.githubusercontent.com/" + REPOSITORY
+FILES = ("overlay_updater.py", "clock_overlay_v3.py", "ip_overlay.py",
+         "cchl_cal_overlay.py", "ceel_cal_overlay.py", "README.md",
+         "calendar_config.example.json")
+STATE = ".overlay-update.json"
+LOCK = ".overlay-update.lock"
+BACKUPS = ".overlay-update-backups"
+MAX_FILE = 1024 * 1024
+TIMEOUT = 15
+SHA = re.compile(r"[0-9a-f]{40}$")
 
 
 class UpdateError(Exception):
     """A sanitized, user-actionable update failure."""
 
 
-def protected(path):
-    parts = PurePosixPath(path.replace("\\", "/").casefold()).parts
-    # Windows ignores trailing spaces/dots in ordinary paths.
-    parts = tuple(part.rstrip(" .") for part in parts)
-    return any(part in {"font", "fonts", "clock_overlay.py", "clock_overlay_v2.py"}
-               or (part.startswith("calendar_config") and
-                   part != "calendar_config.example.json")
-               or PurePosixPath(part).suffix in FONT_SUFFIXES for part in parts)
+def valid_url(url):
+    parsed = urlsplit(url)
+    if (parsed.scheme != "https" or parsed.hostname not in
+            {"api.github.com", "raw.githubusercontent.com"} or
+            parsed.username or parsed.password or parsed.port not in (None, 443)
+            or parsed.fragment):
+        raise UpdateError("Blocked an unexpected download host or non-HTTPS URL.")
 
 
-class GitUpdater:
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Canonical public endpoints need no redirects. Fail closed.
+        raise UpdateError("GitHub redirected a download. Retry later or update manually.")
+
+
+def download(url, limit=MAX_FILE):
+    valid_url(url)
+    request = Request(url, headers={"User-Agent": "windows-overlays-updater",
+                                   "Accept": "application/vnd.github+json",
+                                   "Accept-Encoding": "identity"})
+    try:
+        started = time.monotonic()
+        with build_opener(NoRedirect()).open(request, timeout=TIMEOUT) as response:
+            valid_url(response.geturl())
+            if response.geturl() != url or response.status != 200:
+                raise UpdateError("Unexpected GitHub download response.")
+            length = response.headers.get("Content-Length")
+            if length and (not length.isdigit() or int(length) > limit):
+                raise UpdateError("GitHub response exceeded the download size limit.")
+            chunks, size = [], 0
+            while True:
+                chunk = response.read1(min(65536, limit + 1 - size))
+                size += len(chunk)
+                if size > limit or time.monotonic() - started > 45:
+                    raise UpdateError("GitHub download exceeded its size or time limit.")
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+    except HTTPError as error:
+        if error.code in (403, 429):
+            raise UpdateError("GitHub rate limit or access restriction. Wait and retry later; no sign-in is required.") from None
+        if error.code == 404:
+            raise UpdateError("Published update not found (404). Retry later or check the public repository.") from None
+        raise UpdateError("GitHub download failed (HTTP %s). Retry later." % error.code) from None
+    except (URLError, OSError, TimeoutError):
+        raise UpdateError("Cannot download from GitHub. Check internet access, TLS certificates and firewall; retry later.") from None
+
+
+def decode_json(data):
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise UpdateError("Invalid update metadata; nothing was installed.") from None
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def blob_digest(data):
+    return hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + bytes([0]) + data).hexdigest()
+
+
+def validate_content(name, data):
+    try:
+        text = data.decode("utf-8-sig")
+        if not text.strip() or chr(0) in text:
+            raise ValueError()
+        if name.endswith(".py"):
+            tree = ast.parse(text, filename=name)  # Parse only; never import/execute.
+            if not tree.body:
+                raise ValueError()
+        elif name.endswith(".json"):
+            example = json.loads(text)
+            if (set(example) != {"cchl_ical_url", "ceel_ical_url"} or
+                    any(not isinstance(v, str) or v != "YOUR_GOOGLE_CALENDAR_SECRET_ICAL_URL"
+                        for v in example.values())):
+                raise ValueError()
+        elif not text.startswith("# Windows desktop overlays"):
+            raise ValueError()
+    except (ValueError, UnicodeError, SyntaxError, TypeError, AttributeError):
+        raise UpdateError("Invalid published content: " + name) from None
+
+
+class FolderUpdater:
     def __init__(self, directory):
-        self.directory = Path(directory).resolve()
-        self.git = shutil.which("git")
-        if not self.git:
-            raise UpdateError("Git not found. Install Git for Windows, then reopen the overlay.")
+        self.directory = Path(directory).resolve(strict=True)
+        self.recovery_needed = False
 
-    def run(self, *args, timeout=20, allowed=(0,)):
-        env = os.environ.copy()
-        # Do not let an unrelated launcher redirect operations into another repository.
-        for key in list(env):
-            if key.startswith("GIT_"):
-                del env[key]
-        env.update(GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never",
-                   GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=15")
+    def path(self, name):
+        # Names originate only in fixed constants, never remote paths.
+        if name not in (*FILES, STATE, LOCK, BACKUPS):
+            raise UpdateError("Unsafe update path.")
+        path = self.directory / name
+        for entry in self.directory.iterdir():
+            if entry.name.rstrip(" .").casefold() == name.casefold() and entry.name != name:
+                raise UpdateError("Ambiguous local filename: " + name)
         try:
-            result = subprocess.run(
-                [self.git, "-c", "core.hooksPath=" + os.devnull, "-c", "submodule.recurse=false",
-                 "-c", "core.fsmonitor=false", "-c", "http.followRedirects=false", *args],
-                cwd=self.directory, env=env, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except subprocess.TimeoutExpired:
-            raise UpdateError("Git timed out. Check connectivity/authentication; inspect git status before retrying.") from None
-        except OSError:
-            raise UpdateError("Could not run Git. Check the installation and folder permissions.") from None
-        if result.returncode not in allowed:
-            # Never display raw Git output: remotes/helpers may include credentials.
-            if args[0] in {"fetch", "ls-remote"}:
-                raise UpdateError("Cannot reach the private repository. Check your network and GitHub access. "
-                                  "Authenticate with Git Credential Manager in a terminal, then retry.")
-            raise UpdateError("Git refused the operation. Inspect git status in a terminal; "
-                              "resolve locks, permissions or local changes before retrying.")
-        output = result.stdout.decode("utf-8", errors="surrogateescape")
-        return (output if "-z" in args else output.strip()), result.returncode
+            info = path.lstat()
+        except FileNotFoundError:
+            return path
+        if (stat.S_ISLNK(info.st_mode) or
+                getattr(info, "st_file_attributes", 0) & 0x400 or
+                (name != BACKUPS and not stat.S_ISREG(info.st_mode)) or
+                (name == BACKUPS and not stat.S_ISDIR(info.st_mode))):
+            raise UpdateError("Unsafe local path (link or wrong file type): " + name)
+        return path
 
-    def text(self, *args, **kwargs):
-        return self.run(*args, **kwargs)[0]
+    def snapshot(self):
+        result = {}
+        for name in (*FILES, STATE):
+            path = self.path(name)
+            if path.exists() and path.stat().st_size > MAX_FILE:
+                raise UpdateError("Local file too large; preserve and reconcile manually: " + name)
+            result[name] = path.read_bytes() if path.exists() else None
+        return result
 
-    def local_state(self):
-        branch = self.text("symbolic-ref", "--quiet", "--short", "HEAD", allowed=(0, 1))
-        if branch != BRANCH:
-            raise UpdateError("Detached HEAD or wrong branch. Switch to the repository's main branch in a terminal.")
-        if self.text("status", "--porcelain=v1", "--untracked-files=no", "--ignore-submodules=none"):
-            raise UpdateError("Tracked files have local changes. Commit or back them up and resolve them manually first.")
-        for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"):
-            marker = Path(self.text("rev-parse", "--git-path", name))
-            if not marker.is_absolute():
-                marker = self.directory / marker
-            if marker.exists():
-                raise UpdateError("A Git merge/rebase is in progress. Finish it manually first.")
-        # Skip-worktree / assume-unchanged can hide modified tracked files.
-        entries = self.text("ls-files", "-v", "-z").split("\0")
-        if any(entry and (entry[0].islower() or entry[0] == "S") for entry in entries):
-            raise UpdateError("Tracked files have skip-worktree/assume-unchanged flags. Resolve these in Git first.")
-        return self.text("rev-parse", "HEAD")
+    @contextmanager
+    def locked(self):
+        path = self.path(LOCK)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            raise UpdateError("Another overlay update is running or was interrupted. See README lock/recovery steps.") from None
+        os.close(fd)
+        try:
+            yield
+        finally:
+            if not self.recovery_needed:
+                path.unlink()
+
+    def fetch(self):
+        commit = decode_json(download(API + "/commits/main"))
+        sha = commit.get("sha") if isinstance(commit, dict) else None
+        if not isinstance(sha, str) or not SHA.fullmatch(sha):
+            raise UpdateError("Invalid published commit SHA.")
+        tree = decode_json(download(API + "/git/trees/" + sha))
+        if not isinstance(tree, dict) or tree.get("truncated") is not False or not isinstance(tree.get("tree"), list):
+            raise UpdateError("Invalid or truncated published file list.")
+        entries = {}
+        for entry in tree["tree"]:
+            if not isinstance(entry, dict):
+                raise UpdateError("Invalid published file list.")
+            name = entry.get("path")
+            if not isinstance(name, str):
+                raise UpdateError("Invalid published path.")
+            if name in FILES:
+                if name in entries:
+                    raise UpdateError("Duplicate published file.")
+                entries[name] = entry
+        if set(entries) != set(FILES):
+            raise UpdateError("Published update is missing required files.")
+        data = {}
+        for name in FILES:
+            entry = entries[name]
+            if (entry.get("type") != "blob" or entry.get("mode") not in ("100644", "100755") or
+                    type(entry.get("size")) is not int or not 0 < entry["size"] <= MAX_FILE or
+                    not isinstance(entry.get("sha"), str) or not SHA.fullmatch(entry["sha"])):
+                raise UpdateError("Invalid published file metadata: " + name)
+            content = download(RAW + "/" + sha + "/" + name)
+            if len(content) != entry["size"] or blob_digest(content) != entry["sha"]:
+                raise UpdateError("Downloaded file failed GitHub blob verification: " + name)
+            validate_content(name, content)
+            data[name] = content
+        return sha, data
 
     def update(self):
-        if not (self.directory / ".git").exists():
-            raise UpdateError("This is not a Git clone. Follow the README to clone into a new folder; keep your local files.")
-        if Path(self.text("rev-parse", "--show-toplevel")).resolve() != self.directory:
-            raise UpdateError("The overlay folder must be the root of its own Git clone.")
-        # Reject URL rewriting as well as additional fetch URLs before contacting anything.
-        raw = self.text("config", "--get-all", "remote.origin.url", allowed=(0, 1)).splitlines()
-        effective = self.text("remote", "get-url", "--all", "origin", allowed=(0, 2, 128)).splitlines()
-        if len(raw) != 1 or raw != effective or raw[0] not in ALLOWED_ORIGINS:
-            raise UpdateError("Wrong origin or URL rewrite. Expected the trusted mcann1423/windows-overlays GitHub repository.")
-        before = self.local_state()
-        # Serialize updater instances across the four independent overlay processes.
-        lock = Path(self.text("rev-parse", "--git-path", "overlay-update.lock"))
-        if not lock.is_absolute():
-            lock = self.directory / lock
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            raise UpdateError("Another overlay update is running. If one crashed, verify Git is idle before removing .git/overlay-update.lock.") from None
-        try:
-            os.close(fd)
-            head = self.text("ls-remote", "--symref", raw[0], "HEAD", timeout=60)
-            if f"ref: refs/heads/{BRANCH}\tHEAD" not in head.splitlines():
-                raise UpdateError("The remote default branch changed. Update manually after reviewing the repository.")
-            self.text("fetch", "--no-tags", "--no-recurse-submodules", "--refmap=", raw[0],
-                      f"refs/heads/{BRANCH}", timeout=90)
-            target = self.text("rev-parse", "--verify", "FETCH_HEAD^{commit}")
-            # Check entire candidate tree, not only changed files. Never let ignored
-            # config/fonts/legacy paths become tracked (Git may overwrite ignored files).
-            tree = self.text("ls-tree", "-r", "-z", target)
-            paths = []
-            for entry in tree.split("\0"):
-                if not entry:
-                    continue
-                meta, path = entry.split("\t", 1)
-                if protected(path) or meta.split()[0] not in {"100644", "100755"}:
-                    raise UpdateError("Update blocked: upstream contains protected local paths, symlinks or submodules. Nothing was applied.")
-                components = path.split("/")
-                if any(part != part.rstrip(" .") or ":" in part or "\\" in part for part in components):
-                    raise UpdateError("Update blocked: upstream has ambiguous Windows paths.")
-                folded = path.casefold()
-                if folded in paths:
-                    raise UpdateError("Update blocked: upstream has case-colliding Windows paths.")
-                paths.append(folded)
-            # Protect ALL ignored/untracked local files, including Windows case collisions
-            # and file/directory replacement, before merge touches the working tree.
-            local = self.text("ls-files", "--others", "-z").split("\0")
-            for name in filter(None, local):
-                name = name.casefold().rstrip("/")
-                if any(name == p or name.startswith(p + "/") or p.startswith(name + "/") for p in paths):
-                    raise UpdateError("Update blocked: upstream would collide with an untracked or ignored local file. Move/back it up manually first.")
-            if self.local_state() != before:
-                raise UpdateError("Repository changed during the check. Retry after other Git operations finish.")
-            if target == before:
-                return "Already up to date. No files changed."
-            if self.run("merge-base", "--is-ancestor", before, target, allowed=(0, 1))[1]:
-                raise UpdateError("Local branch is ahead of or diverged from GitHub. Reconcile it manually; no reset or merge was performed.")
-            self.text("merge", "--ff-only", "--no-edit", "--no-autostash", target, timeout=60)
-            return ("Updated successfully. Restart ALL running overlays manually to apply the new code. "
-                    "No overlays were stopped; local config and fonts were preserved.")
-        finally:
-            lock.unlink()
+            with self.locked():
+                return self._update()
+        except OSError:
+            raise UpdateError("Update could not access the folder. Check permissions, disk space and backups before retrying.") from None
+
+    def _update(self):
+        before = self.snapshot()
+        if before[STATE] is not None:
+            state = decode_json(before[STATE])
+            if (not isinstance(state, dict) or state.get("version") != 1 or
+                    not isinstance(state.get("files"), dict) or set(state["files"]) != set(FILES) or
+                    not isinstance(state.get("commit"), str) or not SHA.fullmatch(state["commit"])):
+                raise UpdateError("Invalid installed baseline. Preserve it and reconcile manually; see README.")
+            for name in FILES:
+                if before[name] is None or digest(before[name]) != state["files"][name]:
+                    raise UpdateError("Local edits or missing installed file: " + name +
+                                      ". Back up and reconcile manually; nothing replaced.")
+        sha, incoming = self.fetch()
+        state_bytes = (json.dumps({"version": 1, "commit": sha,
+                                  "files": {n: digest(incoming[n]) for n in FILES}},
+                                 indent=2) + chr(10)).encode("utf-8")
+        incoming[STATE] = state_bytes
+        changed = [n for n in incoming if incoming[n] != before[n]]
+        if not changed:
+            return "Already up to date. No files changed."
+        # Staging shares the target filesystem, so os.replace is per-file atomic.
+        with tempfile.TemporaryDirectory(prefix=".overlay-update-stage-", dir=self.directory) as temp:
+            stage = Path(temp)
+            for name in changed:
+                with (stage / name).open("wb") as file:
+                    file.write(incoming[name])
+                    file.flush()
+                    os.fsync(file.fileno())
+                if (stage / name).read_bytes() != incoming[name]:
+                    raise UpdateError("Staged file verification failed; nothing replaced.")
+            if self.snapshot() != before:
+                raise UpdateError("Local files changed during download; nothing replaced. Retry when editing is finished.")
+            backups = self.path(BACKUPS)
+            backups.mkdir(exist_ok=True)
+            backup = Path(tempfile.mkdtemp(prefix=sha[:12] + "-", dir=backups))
+            for name in changed:
+                if before[name] is not None:
+                    with (backup / name).open("wb") as file:
+                        file.write(before[name])
+                        file.flush()
+                        os.fsync(file.fileno())
+                    if (backup / name).read_bytes() != before[name]:
+                        raise UpdateError("Backup verification failed; nothing replaced.")
+            journal = json.dumps({"replaced": changed,
+                                  "previously_absent": [n for n in changed if before[n] is None]}, indent=2)
+            with (backup / "recovery.json").open("w", encoding="utf-8") as file:
+                file.write(journal)
+                file.flush()
+                os.fsync(file.fileno())
+            if self.snapshot() != before:
+                raise UpdateError("Local files changed before installation; nothing replaced.")
+            replaced = []
+            try:
+                # Metadata is last; it never describes a partially applied update.
+                for name in changed:
+                    os.replace(stage / name, self.path(name))
+                    replaced.append(name)
+            except (OSError, UpdateError):
+                failed = []
+                for name in reversed(replaced):
+                    try:
+                        if before[name] is None:
+                            self.path(name).unlink()
+                        else:
+                            restore = stage / name
+                            shutil.copyfile(backup / name, restore)
+                            os.replace(restore, self.path(name))
+                    except (OSError, UpdateError):
+                        failed.append(name)
+                if failed:
+                    self.recovery_needed = True  # Keep lock to block future updates.
+                    raise UpdateError("Rollback incomplete. Do not restart overlays; restore from " + str(backup)) from None
+                raise UpdateError("Install failed; previous files restored. Backups: " + str(backup)) from None
+        return ("Updated successfully. Restart ALL running overlays manually. Config/fonts untouched. "
+                "Previous files backed up in " + str(backup) +
+                (". First-use baseline recorded." if before[STATE] is None else "."))
 
 
 def update_checkout(directory):
     if sys.platform != "win32":
         raise UpdateError("Overlay updates are supported on Windows only.")
-    return GitUpdater(directory).update()
+    return FolderUpdater(directory).update()
 
 
 def attach_update_menu(root, script_file):
@@ -175,7 +308,7 @@ def attach_update_menu(root, script_file):
         except UpdateError as error:
             results.put((False, str(error)))
         except Exception:
-            results.put((False, "Update failed unexpectedly. Inspect git status in a terminal before retrying."))
+            results.put((False, "Update failed unexpectedly. Check folder permissions and retained backups before retrying."))
 
     def poll():
         nonlocal busy
@@ -191,12 +324,12 @@ def attach_update_menu(root, script_file):
     def start():
         nonlocal busy
         if busy or not messagebox.askyesno(
-                "Overlay updates", "Check GitHub and apply a clean fast-forward update to this folder? "
-                "All four overlays share these files. Restart them manually afterward.", parent=root):
+                "Overlay updates", "Download and replace the seven published application/documentation files? "
+                "All overlays share these files. First use has no baseline: existing code, including edits, may be replaced and backed up. Later edits block updates. Config/fonts/other files are untouched. Restart all overlays manually afterward.", parent=root):
             return
         busy = True
         menu.entryconfigure(0, state="disabled", label="Checking for updates…")
-        # Non-daemon: closing this window must not abandon an in-progress Git write.
+        # Non-daemon: closing this window must not abandon an in-progress file transaction.
         threading.Thread(target=worker, daemon=False).start()
         root.after(100, poll)
 

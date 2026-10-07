@@ -1,231 +1,263 @@
-"""Offline tests: real temporary Git fixtures; never import overlay applications."""
+"""No Git, real HTTP, calendar data or GUI imports required."""
+import io
+import json
 import os
 from pathlib import Path
-import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 import sys
 import types
-
+from urllib.error import HTTPError, URLError
 import overlay_updater as updater
 
 
-def git(path, *args):
-    env = os.environ.copy()
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
-               GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid")
-    return subprocess.check_output(["git", "-C", str(path), *args], env=env,
-                                   stderr=subprocess.DEVNULL).decode().strip()
+def encoded(value):
+    return json.dumps(value).encode()
 
 
-class CheckoutTests(unittest.TestCase):
+class FolderTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name)
-        self.remote = self.base / "remote"
-        self.remote.mkdir()
-        git(self.remote, "init", "-b", "main")
-        (self.remote / "code.py").write_text("original")
-        (self.remote / ".gitignore").write_text("calendar_config*\n*.ttf\nfonts/\nclock_overlay.py\nlocal*\n")
-        git(self.remote, "add", ".")
-        git(self.remote, "commit", "-m", "initial")
-        self.local = self.base / "local"
-        git(self.base, "clone", str(self.remote), str(self.local))
-        git(self.local, "remote", "set-url", "origin", updater.ORIGIN)
-        self.engine = updater.GitUpdater(self.local)
-        original_run = self.engine.run
+        self.root = Path(self.temp.name)
+        self.engine = updater.FolderUpdater(self.root)
+        self.sha = 'a' * 40
+        self.files = {n: b'x = 1\n' for n in updater.FILES}
+        self.files['README.md'] = b'# Windows desktop overlays\n'
+        self.files['calendar_config.example.json'] = encoded({
+            'cchl_ical_url': 'YOUR_GOOGLE_CALENDAR_SECRET_ICAL_URL',
+            'ceel_ical_url': 'YOUR_GOOGLE_CALENDAR_SECRET_ICAL_URL'})
+        self.urls = []
+        self.mock = patch.object(updater, 'download', side_effect=self.http).start()
+        self.addCleanup(patch.stopall)
 
-        def offline_run(*args, **kwargs):
-            # Only network destinations are replaced; allow-list validation stays real.
-            if args[0] in {"ls-remote", "fetch"}:
-                args = tuple(str(self.remote) if arg == updater.ORIGIN else arg for arg in args)
-            return original_run(*args, **kwargs)
-        self.engine.run = offline_run
-        self.before = git(self.local, "rev-parse", "HEAD")
+    def http(self, url, limit=updater.MAX_FILE):
+        self.urls.append(url)
+        if url == updater.API + '/commits/main':
+            return encoded({'sha': self.sha})
+        if url == updater.API + '/git/trees/' + self.sha:
+            return encoded({'truncated': False, 'tree': [dict(path=n, mode='100644',
+                type='blob', size=len(data), sha=updater.blob_digest(data))
+                for n, data in self.files.items()]})
+        prefix = updater.RAW + '/' + self.sha + '/'
+        self.assertTrue(url.startswith(prefix))
+        return self.files[url[len(prefix):]]
 
-    def commit_remote(self, path="code.py", text="updated"):
-        target = self.remote / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text)
-        git(self.remote, "add", "-f", path)
-        git(self.remote, "commit", "-m", "update")
+    def installed(self):
+        return {n: (self.root / n).read_bytes() if (self.root / n).exists() else None
+                for n in (*updater.FILES, updater.STATE)}
 
-    def blocked(self, message):
-        with self.assertRaisesRegex(updater.UpdateError, message):
+    def test_zip_first_install_current_new_self_update(self):
+        (self.root / 'overlay_updater.py').write_bytes(b'old edited code')
+        self.assertIn('First-use', self.engine.update())
+        backup = next((self.root / updater.BACKUPS).iterdir())
+        self.assertEqual((backup / 'overlay_updater.py').read_bytes(), b'old edited code')
+        self.assertFalse((self.root / '.git').exists())
+        self.assertEqual(self.urls.count(updater.API + '/commits/main'), 1)
+        self.assertIn('Already up to date', self.engine.update())
+        self.sha = 'b' * 40
+        self.files['overlay_updater.py'] = b'x = 2\n'
+        self.assertIn('Restart ALL', self.engine.update())
+        self.assertEqual((self.root / 'overlay_updater.py').read_bytes(), b'x = 2\n')
+        self.assertEqual(json.loads((self.root / updater.STATE).read_text())['commit'], self.sha)
+
+    def test_preserve_unmanaged(self):
+        names = ['calendar_config.json', 'Nunito.ttf', 'clock_overlay.py',
+                 'clock_overlay_v2.py', 'unknown.txt', '.git/index', 'fonts/custom.otf']
+        for n in names:
+            p = self.root / n; p.parent.mkdir(exist_ok=True); p.write_bytes(b'private')
+        self.engine.update()
+        for n in names:
+            self.assertEqual((self.root / n).read_bytes(), b'private')
+
+    def test_download_failure_no_mutation(self):
+        (self.root / 'ip_overlay.py').write_bytes(b'original')
+        before = self.installed()
+        def fail(url, **kwargs):
+            if url.endswith('/ceel_cal_overlay.py'):
+                raise updater.UpdateError('offline')
+            return self.http(url, **kwargs)
+        self.mock.side_effect = fail
+        with self.assertRaisesRegex(updater.UpdateError, 'offline'):
             self.engine.update()
-        self.assertEqual(git(self.local, "rev-parse", "HEAD"), self.before)
+        self.assertEqual(self.installed(), before)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ['ip_overlay.py'])
 
-    def test_fast_forward_preserves_local_files(self):
-        files = {"calendar_config.json": "private fixture", "Font.ttf": "font fixture",
-                 "clock_overlay.py": "legacy fixture", "fonts/nested.bin": "font data"}
-        for name, value in files.items():
-            path = self.local / name
-            path.parent.mkdir(exist_ok=True)
-            path.write_text(value)
-        self.commit_remote()
-        self.assertIn("Restart ALL", self.engine.update())
-        self.assertEqual(git(self.local, "rev-parse", "HEAD"), git(self.remote, "rev-parse", "HEAD"))
-        for name, value in files.items():
-            self.assertEqual((self.local / name).read_text(), value)
+    def test_corrupt_hash_no_mutation(self):
+        def corrupt(url, **kwargs):
+            data = self.http(url, **kwargs)
+            return b'corrupt' if url.endswith('/ip_overlay.py') else data
+        self.mock.side_effect = corrupt
+        with self.assertRaisesRegex(updater.UpdateError, 'blob verification'):
+            self.engine.update()
+        self.assertFalse(any(self.installed().values()))
 
-    def test_no_update(self):
-        self.assertIn("Already up to date", self.engine.update())
+    def test_invalid_syntax_and_example(self):
+        for name, data in [('ip_overlay.py', b'if :'),
+                           ('calendar_config.example.json', b'{}'),
+                           ('README.md', b'<html>error</html>')]:
+            with self.subTest(name=name):
+                original = self.files[name]; self.files[name] = data
+                with self.assertRaisesRegex(updater.UpdateError, 'Invalid published content'):
+                    self.engine.update()
+                self.assertFalse(any(self.installed().values()))
+                self.files[name] = original
 
-    def test_dirty(self):
-        (self.local / "code.py").write_text("local edit")
-        self.blocked("local changes")
+    def test_missing_file_and_upstream_links(self):
+        del self.files['ip_overlay.py']
+        with self.assertRaisesRegex(updater.UpdateError, 'missing required'):
+            self.engine.update()
+        self.files['ip_overlay.py'] = b'x=1'
+        def link(url, **kwargs):
+            data = self.http(url, **kwargs)
+            if '/git/trees/' in url:
+                tree = json.loads(data); tree['tree'][0]['mode'] = '120000'; return encoded(tree)
+            return data
+        self.mock.side_effect = link
+        with self.assertRaisesRegex(updater.UpdateError, 'file metadata'):
+            self.engine.update()
 
-    def test_staged(self):
-        (self.local / "code.py").write_text("local edit")
-        git(self.local, "add", "code.py")
-        self.blocked("local changes")
+    def test_local_edits_and_missing_files_block(self):
+        self.engine.update()
+        path = self.root / 'ip_overlay.py'
+        for content in (b'custom', None):
+            if content is None: path.unlink()
+            else: path.write_bytes(content)
+            before = self.installed(); self.mock.reset_mock()
+            with self.assertRaisesRegex(updater.UpdateError, 'Local edits'):
+                self.engine.update()
+            self.assertEqual(self.installed(), before)
+            self.mock.assert_not_called()
 
-    def test_detached(self):
-        git(self.local, "checkout", "--detach")
-        self.blocked("Detached")
+    def test_invalid_baseline_blocks(self):
+        (self.root / updater.STATE).write_bytes(b'{}')
+        with self.assertRaisesRegex(updater.UpdateError, 'baseline'):
+            self.engine.update()
+        self.mock.assert_not_called()
 
-    def test_wrong_branch(self):
-        git(self.local, "checkout", "-b", "other")
-        self.blocked("wrong branch")
+    def test_download_time_edit_blocks(self):
+        def edit(url, **kwargs):
+            if url.endswith('/README.md'):
+                (self.root / 'ip_overlay.py').write_bytes(b'user editing')
+            return self.http(url, **kwargs)
+        self.mock.side_effect = edit
+        with self.assertRaisesRegex(updater.UpdateError, 'changed during download'):
+            self.engine.update()
+        self.assertEqual((self.root / 'ip_overlay.py').read_bytes(), b'user editing')
+        self.assertFalse((self.root / updater.STATE).exists())
 
-    def test_diverged(self):
-        (self.local / "local.py").write_text("local commit")
-        git(self.local, "add", "-f", "local.py")
-        git(self.local, "commit", "-m", "local")
-        self.before = git(self.local, "rev-parse", "HEAD")
-        self.commit_remote()
-        self.blocked("diverged")
+    def test_rollback_existing_and_absent(self):
+        for existing in (False, True):
+            if existing: self.engine.update()
+            before = self.installed()
+            self.files['overlay_updater.py'] += b'# next\n'
+            self.files['clock_overlay_v3.py'] += b'# next\n'
+            real = os.replace
+            def fail(src, dst):
+                if Path(dst).name == 'clock_overlay_v3.py': raise PermissionError('locked')
+                real(src, dst)
+            with patch.object(updater.os, 'replace', side_effect=fail):
+                with self.assertRaisesRegex(updater.UpdateError, 'previous files restored'):
+                    self.engine.update()
+            self.assertEqual(self.installed(), before)
+            self.assertFalse((self.root / updater.LOCK).exists())
 
-    def test_ahead(self):
-        (self.local / "code.py").write_text("local commit")
-        git(self.local, "add", ".")
-        git(self.local, "commit", "-m", "local")
-        self.before = git(self.local, "rev-parse", "HEAD")
-        self.blocked("ahead")
+    def test_failed_rollback_retains_lock(self):
+        (self.root / 'overlay_updater.py').write_bytes(b'original')
+        real = os.replace; count = 0
+        def fail(src, dst):
+            nonlocal count
+            count += 1
+            if count > 1: raise PermissionError('locked')
+            real(src, dst)
+        with patch.object(updater.os, 'replace', side_effect=fail):
+            with self.assertRaisesRegex(updater.UpdateError, 'Rollback incomplete'):
+                self.engine.update()
+        self.assertTrue((self.root / updater.LOCK).exists())
+        self.assertEqual(next((self.root / updater.BACKUPS).iterdir()).joinpath('overlay_updater.py').read_bytes(), b'original')
 
-    def test_protected_collision(self):
-        (self.local / "calendar_config.json").write_text("private fixture")
-        self.commit_remote("calendar_config.json", "upstream must not replace")
-        self.blocked("protected")
-        self.assertEqual((self.local / "calendar_config.json").read_text(), "private fixture")
+    def test_concurrent_instances(self):
+        entered, release = threading.Event(), threading.Event()
+        def pause(url, **kwargs):
+            if url.endswith('/commits/main'):
+                entered.set(); self.assertTrue(release.wait(5))
+            return self.http(url, **kwargs)
+        self.mock.side_effect = pause
+        errors = []
+        def work():
+            try: self.engine.update()
+            except Exception as e: errors.append(e)
+        thread = threading.Thread(target=work); thread.start()
+        self.assertTrue(entered.wait(5))
+        try:
+            with self.assertRaisesRegex(updater.UpdateError, 'Another overlay'):
+                updater.FolderUpdater(self.root).update()
+        finally:
+            release.set(); thread.join(5)
+        self.assertFalse(errors)
 
-    def test_upstream_font_rejected_even_without_local_file(self):
-        self.commit_remote("FONT.TTF")
-        self.blocked("protected")
-
-    def test_ignored_collision(self):
-        (self.local / "local-data").write_text("keep")
-        self.commit_remote("local-data")
-        self.blocked("collide")
-        self.assertEqual((self.local / "local-data").read_text(), "keep")
-
-    def test_case_collision(self):
-        (self.local / "LOCAL-DATA").write_text("keep")
-        self.commit_remote("local-data")
-        self.blocked("collide")
-
-    def test_directory_collision(self):
-        (self.local / "local-dir").mkdir()
-        (self.local / "local-dir" / "data").write_text("keep")
-        self.commit_remote("local-dir")
-        self.blocked("collide")
-
-    def test_missing_origin(self):
-        git(self.local, "remote", "remove", "origin")
-        self.blocked("Wrong origin")
-
-    def test_symlink_upstream(self):
-        if os.name == "nt":
-            self.skipTest("Symlink creation requires Windows privileges")
-        (self.remote / "link").symlink_to("code.py")
-        git(self.remote, "add", "link")
-        git(self.remote, "commit", "-m", "symlink")
-        self.blocked("symlinks")
-
-    def test_merge_failure_preserves_local_file(self):
-        self.commit_remote()
-        (self.local / "calendar_config.json").write_text("private fixture")
-        original = self.engine.run
-        def fail(*args, **kwargs):
-            if args[0] == "merge":
-                raise updater.UpdateError("Git refused the operation")
-            return original(*args, **kwargs)
-        self.engine.run = fail
-        self.blocked("refused")
-        self.assertEqual((self.local / "calendar_config.json").read_text(), "private fixture")
-        self.assertFalse((self.local / ".git" / "overlay-update.lock").exists())
-
-    def test_wrong_origin(self):
-        git(self.local, "remote", "set-url", "origin", "https://example.invalid/repo.git")
-        self.blocked("Wrong origin")
-
-    def test_url_rewrite(self):
-        git(self.local, "config", "url.https://example.invalid/.insteadOf", "https://github.com/")
-        self.blocked("URL rewrite")
-
-    def test_default_branch_changed(self):
-        git(self.remote, "branch", "-m", "different")
-        self.blocked("default branch changed")
-
-    def test_concurrent_update(self):
-        (self.local / ".git" / "overlay-update.lock").touch()
-        self.blocked("Another overlay")
-
-    def test_hidden_changes(self):
-        git(self.local, "update-index", "--assume-unchanged", "code.py")
-        (self.local / "code.py").write_text("hidden edit")
-        self.blocked("assume-unchanged")
-
-    def test_network_failure_releases_lock(self):
-        original = self.engine.run
-        def fail(*args, **kwargs):
-            if args[0] == "fetch":
-                raise updater.UpdateError("offline")
-            return original(*args, **kwargs)
-        self.engine.run = fail
-        self.blocked("offline")
-        self.assertFalse((self.local / ".git" / "overlay-update.lock").exists())
+    def test_paths_and_symlinks(self):
+        with self.assertRaisesRegex(updater.UpdateError, 'Unsafe update path'):
+            self.engine.path('../outside')
+        (self.root / 'IP_OVERLAY.PY').write_bytes(b'custom')
+        with self.assertRaisesRegex(updater.UpdateError, 'Ambiguous'):
+            self.engine.update()
+        (self.root / 'IP_OVERLAY.PY').unlink()
+        if os.name != 'nt':
+            (self.root / 'ip_overlay.py').symlink_to(self.root / 'outside')
+            with self.assertRaisesRegex(updater.UpdateError, 'Unsafe local path'):
+                self.engine.update()
 
 
-class UnitTests(unittest.TestCase):
-    def test_protected_names(self):
-        for name in ["CALENDAR_CONFIG.JSON", "calendar_config.json.bak", "font/x",
-                     "fonts/x", "clock_overlay_v2.py", "Nunito.TTF", "font.ttf./child"]:
-            self.assertTrue(updater.protected(name), name)
-        self.assertFalse(updater.protected("calendar_config.example.json"))
+class HTTPTests(unittest.TestCase):
+    def response(self, data=b'ok', headers=None):
+        response = Mock(); response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.status = 200; response.geturl.return_value = updater.API + '/commits/main'
+        response.headers = headers or {}; response.read1.side_effect = io.BytesIO(data).read1
+        return response
 
-    def test_missing_git(self):
-        with patch.object(updater.shutil, "which", return_value=None):
-            with self.assertRaisesRegex(updater.UpdateError, "Git not found"):
-                updater.GitUpdater(".")
+    def test_bounds_timeouts_and_no_auth(self):
+        opener = Mock(); opener.open.return_value = self.response()
+        with patch.object(updater, 'build_opener', return_value=opener):
+            self.assertEqual(updater.download(updater.API + '/commits/main'), b'ok')
+            args, kwargs = opener.open.call_args
+            self.assertEqual(kwargs['timeout'], 15)
+            self.assertFalse(args[0].has_header('Authorization'))
+            opener.open.return_value = self.response(b'long')
+            with self.assertRaisesRegex(updater.UpdateError, 'size or time'):
+                updater.download(updater.API + '/commits/main', limit=2)
+            opener.open.return_value = self.response(headers={'Content-Length': '99999999'})
+            with self.assertRaisesRegex(updater.UpdateError, 'size limit'):
+                updater.download(updater.API + '/commits/main')
+            opener.open.return_value = self.response()
+            with patch.object(updater.time, 'monotonic', side_effect=[0, 46]):
+                with self.assertRaisesRegex(updater.UpdateError, 'time limit'):
+                    updater.download(updater.API + '/commits/main')
 
-    def test_not_clone(self):
-        with tempfile.TemporaryDirectory() as folder:
-            with self.assertRaisesRegex(updater.UpdateError, "not a Git clone"):
-                updater.GitUpdater(folder).update()
+    def test_hosts_redirects_and_errors(self):
+        for url in ('http://api.github.com/x', 'https://evil.invalid/x',
+                    'https://api.github.com@evil.invalid/x', 'https://api.github.com:444/x'):
+            with self.assertRaises(updater.UpdateError): updater.valid_url(url)
+        with self.assertRaisesRegex(updater.UpdateError, 'redirected'):
+            updater.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://evil.invalid/')
+        for error, message in [(HTTPError('url', 404, '', {}, None), '404'),
+                               (HTTPError('url', 403, '', {}, None), 'rate limit'),
+                               (HTTPError('url', 429, '', {}, None), 'rate limit'),
+                               (URLError('secret'), 'internet'), (TimeoutError(), 'internet')]:
+            with patch.object(updater, 'build_opener') as factory:
+                factory.return_value.open.side_effect = error
+                with self.assertRaisesRegex(updater.UpdateError, message):
+                    updater.download(updater.API + '/commits/main')
 
+
+class GuiTests(unittest.TestCase):
     def test_platform_guard(self):
-        with patch.object(updater.sys, "platform", "linux"):
-            with self.assertRaisesRegex(updater.UpdateError, "Windows only"):
-                updater.update_checkout(".")
-
-    def test_subprocess_timeout_and_sanitized_errors(self):
-        engine = updater.GitUpdater(".")
-        with patch.object(updater.subprocess, "run", side_effect=subprocess.TimeoutExpired("git", 20)):
-            with self.assertRaisesRegex(updater.UpdateError, "timed out"):
-                engine.run("fetch")
-        result = subprocess.CompletedProcess([], 128, b"", b"sensitive token")
-        with patch.object(updater.subprocess, "run", return_value=result) as run:
-            with self.assertRaisesRegex(updater.UpdateError, "network and GitHub access") as caught:
-                engine.run("fetch")
-            self.assertNotIn("sensitive", str(caught.exception))
-            kwargs = run.call_args.kwargs
-            self.assertNotIn("shell", kwargs)
-            self.assertEqual(kwargs["timeout"], 20)
-            self.assertEqual(kwargs["env"]["GCM_INTERACTIVE"], "never")
+        with patch.object(updater.sys, 'platform', 'linux'):
+            with self.assertRaisesRegex(updater.UpdateError, 'Windows only'):
+                updater.update_checkout('.')
 
     def test_gui_explicit_worker_and_main_thread_delivery(self):
         root, menu, dialogs = Mock(), Mock(), Mock()
@@ -258,7 +290,3 @@ class UnitTests(unittest.TestCase):
             dialogs.showinfo.assert_not_called()
             poll()
             dialogs.showinfo.assert_called_once()
-
-
-if __name__ == "__main__":
-    unittest.main()

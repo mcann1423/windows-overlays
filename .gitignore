@@ -36,3 +36,9 @@ __pycache__/
 *.[dD][fF][oO][nN][tT]
 [fF][oO][nN][tT]/
 [fF][oO][nN][tT][sS]/
+
+# Local updater state and private code backups
+/.overlay-update.json
+/.overlay-update.lock
+/.overlay-update-backups/
+/.overlay-update-stage-*/
