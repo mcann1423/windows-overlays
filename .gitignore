@@ -1,0 +1,38 @@
+# Private calendar feeds and config backups
+calendar_config.json
+calendar_config.json.*
+calendar_config.*.json
+!calendar_config.example.json
+*cal_overlay.py.bak*
+*cal_overlay.py.old*
+*cal_overlay.py.orig
+*cal_overlay.py~
+.*cal_overlay.py.swp
+.*cal_overlay.py.swo
+
+# Python generated artifacts
+__pycache__/
+*.py[cod]
+
+# Keep legacy clock versions local; only v3 is intended for publication
+/clock_overlay.py
+/clock_overlay_v2.py
+
+# Fonts supplied separately; never distribute via GitHub
+*.[tT][tT][fF]
+*.[oO][tT][fF]
+*.[tT][tT][cC]
+*.[oO][tT][cC]
+*.[wW][oO][fF][fF]
+*.[wW][oO][fF][fF]2
+*.[fF][oO][nN]
+*.[fF][nN][tT]
+*.[pP][fF][bB]
+*.[pP][fF][mM]
+*.[pP][fF][aA]
+*.[bB][dD][fF]
+*.[pP][cC][fF]
+*.[sS][fF][dD]
+*.[dD][fF][oO][nN][tT]
+[fF][oO][nN][tT]/
+[fF][oO][nN][tT][sS]/
