@@ -30,7 +30,9 @@ TRUSTED = frozenset({
 })
 # File/directory write, append, EA, delete-child, attributes; DELETE,
 # WRITE_DAC, WRITE_OWNER; GENERIC_WRITE/ALL. Unknown rights also fail closed.
-READ_ONLY = 0x001200A9 | 0x80000000 | 0x20000000
+READ_ONLY = 0x001200A9
+FILE_ALL_ACCESS = 0x001F01FF
+INHERIT_ONLY = 0x08
 REPARSE = 0x400
 DIRECTORY = 0x10
 MANAGED = frozenset({'overlay_updater.py', 'overlay_windows.py', 'overlay_appearance.py',
@@ -57,6 +59,18 @@ def _trustee_label(sid):
     return "other SID (redacted)"
 
 
+def _file_rights(mask):
+    # Win32 file/directory generic mapping; retain unknown bits to fail closed.
+    specific = mask & ~0xF0000000
+    for generic, rights in ((0x80000000, 0x00120089),
+                            (0x40000000, 0x00120116),
+                            (0x20000000, 0x001200A0),
+                            (0x10000000, FILE_ALL_ACCESS)):
+        if mask & generic:
+            specific |= rights
+    return specific
+
+
 def _acl_policy(owner, aces, directory, inheritance=False, ancestor=False):
     if owner not in TRUSTED:
         raise SecurityError("Installation object has an untrusted owner (%s)." % _trustee_label(owner))
@@ -72,18 +86,33 @@ def _acl_policy(owner, aces, directory, inheritance=False, ancestor=False):
         # handles prevent replacement of our existing child directories; DELETE_CHILD,
         # WRITE_DAC/OWNER and all other mutation rights remain forbidden.
         allowed = READ_ONLY | (0x4 if ancestor else 0)
-        effective = not flags & 8  # INHERIT_ONLY does not apply to this object.
-        if kind == 0 and sid not in TRUSTED and mask & ~allowed and (effective or not ancestor):
+        effective = not flags & INHERIT_ONLY
+        rights = _file_rights(mask)
+        # INHERIT_ONLY never controls access to this object, regardless of SID.
+        # Every existing runtime/managed descendant is independently inspected.
+        if kind == 0 and sid not in TRUSTED and rights & ~allowed and effective:
             raise SecurityError(
                 "Installation ACL grants untrusted write rights "
                 "(ACE %d, mask 0x%08X, flags 0x%02X; trustee %s; %s; %s)." %
                 (index, mask, flags, _trustee_label(sid),
                  "applies to object" if effective else "inherit-only",
                  "ancestor directory" if ancestor else "directory" if directory else "file"))
+        # Writable update directories must also be safe BEFORE child creation:
+        # an inherit-only grant to an untrusted principal could expose a new stage
+        # or file before its post-create check. CREATOR OWNER is a placeholder,
+        # not OWNER RIGHTS: elevated creates must still pass trusted-owner and
+        # effective-DACL checks afterward. Never treat other SIDs as placeholders.
+        if (directory and inheritance and kind == 0 and flags & 3
+                and sid not in TRUSTED and sid != "S-1-3-0"
+                and rights & ~READ_ONLY):
+            raise SecurityError(
+                "Update directory ACL would grant untrusted child write rights "
+                "(ACE %d, mask 0x%08X, flags 0x%02X; trustee %s)." %
+                (index, mask, flags, _trustee_label(sid)))
         # Require an ordinary inheritable full-control grant to a trusted
         # principal. CREATOR OWNER is intentionally not accepted.
         if (kind == 0 and sid in TRUSTED and flags & 3 == 3
-                and not flags & 4 and mask & 0x001F01FF == 0x001F01FF):
+                and not flags & 4 and rights & FILE_ALL_ACCESS == FILE_ALL_ACCESS):
             inherited_admin = True
     if directory and inheritance and not inherited_admin:
         raise SecurityError("Update directory lacks safe inheritable full control.")

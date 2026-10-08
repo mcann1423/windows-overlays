@@ -54,14 +54,48 @@ class PolicyTests(unittest.TestCase):
                 sec._acl_policy(ADMIN, SAFE + [(0, 0, mask, USER)], False)
     def test_invalid_acl(self):
         for owner, aces in [(USER, SAFE), (ADMIN, None),
-                (ADMIN, [(9, 0, 1, ADMIN)]), (ADMIN, [(0, 0x80, 1, ADMIN)]),
-                (ADMIN, SAFE + [(0, 8, 2, USER)])]:
+                (ADMIN, [(9, 0, 1, ADMIN)]), (ADMIN, [(0, 0x80, 1, ADMIN)])]:
             with self.subTest(aces=aces), self.assertRaises(sec.SecurityError):
                 sec._acl_policy(owner, aces, True)
     def test_inheritance(self):
         for flags in (0, 1, 2, 7):
             with self.assertRaises(sec.SecurityError):
                 sec._acl_policy(ADMIN, [(0, flags, 0x1F01FF, ADMIN)], True, True)
+    def test_generic_file_mapping(self):
+        for mask, expected in [(0x80000000, 0x120089), (0x40000000, 0x120116),
+                               (0x20000000, 0x1200A0), (0x10000000, 0x1F01FF),
+                               (0xA0000000, 0x1200A9), (0x82000000, 0x2120089)]:
+            self.assertEqual(sec._file_rights(mask), expected)
+        for flags in (3, 11, 19, 27):
+            sec._acl_policy(ADMIN, [(0, flags, 0x10000000, ADMIN)], True, True)
+        for mask in (0x80000000, 0x20000000, 0xA0000000):
+            sec._acl_policy(ADMIN, SAFE + [(0, 19, mask, USER)], True, True)
+
+    def test_inherit_only_never_grants_current_object_access(self):
+        # Includes screenshot flags 0x1B, but makes no assumption about its SID.
+        for sid in (USER, 'S-1-3-0', 'S-1-3-4', 'S-1-1-0', 'S-1-3-1'):
+            for flags in (8, 9, 10, 11, 15, 24, 25, 26, 27, 31):
+                for directory in (False, True):
+                    with self.subTest(sid=sid, flags=flags, directory=directory):
+                        sec._acl_policy(ADMIN, SAFE + [(0, flags, 0x10000000, sid)], directory)
+                        with self.assertRaises(sec.SecurityError):
+                            sec._acl_policy(ADMIN, SAFE + [(0, flags & ~8, 0x10000000, sid)], directory)
+        # Unsupported ACEs/flags remain unsupported, even when inherit-only.
+        for kind, flags in ((9, 27), (0, 0x9B)):
+            with self.assertRaises(sec.SecurityError):
+                sec._acl_policy(ADMIN, SAFE + [(kind, flags, 0x10000000, USER)], True)
+
+    def test_child_creation_policy_distinguishes_creator_owner(self):
+        sec._acl_policy(ADMIN, SAFE + [(0, 27, 0x10000000, 'S-1-3-0')], True, True)
+        for sid in (USER, 'S-1-3-4', 'S-1-1-0', 'S-1-3-1'):
+            for flags in (9, 10, 11, 15, 25, 26, 27, 31):
+                with self.subTest(sid=sid, flags=flags):
+                    with self.assertRaisesRegex(sec.SecurityError, 'child write rights'):
+                        sec._acl_policy(ADMIN, SAFE + [(0, flags, 0x10000000, sid)], True, True)
+        # CREATOR OWNER cannot supply the required trusted inheritance grant.
+        with self.assertRaisesRegex(sec.SecurityError, 'lacks safe inheritable'):
+            sec._acl_policy(ADMIN, [(0, 27, 0x10000000, 'S-1-3-0')], True, True)
+
     def test_deny_not_used_to_override_allow(self):
         with self.assertRaises(sec.SecurityError):
             sec._acl_policy(ADMIN, [(1, 0, 2, USER), (0, 0, 2, USER)], False)
@@ -122,6 +156,56 @@ class ContextTests(unittest.TestCase):
             self.assertEqual(set(self.api.nodes), set(guard.guards))
             guard.revalidate()
         self.assertFalse(self.api.handles)
+    def test_default_style_split_generic_creator_acl(self):
+        # Representative inherited DACL: effective mapped admin grant plus an
+        # unmapped inherit-only CREATOR OWNER grant. Not a captured user DACL.
+        for node in self.api.nodes.values():
+            node[3] = [(0, 16, 0x1F01FF, ADMIN), (0, 16, 0x1200A9, 'S-1-5-32-545')]
+            if node[1]:
+                node[3] += [(0, 27, 0x10000000, ADMIN), (0, 27, 0x10000000, 'S-1-3-0')]
+        with self.context() as guard:
+            self.assertEqual(set(guard.guards), set(self.api.nodes))
+            guard.revalidate()
+        self.assertFalse(self.api.handles)
+
+    def test_runtime_descendants_checked_after_inherit_only_parent(self):
+        for child in ('C:/Python/Lib', 'C:/Python/Lib/os.py', 'C:/Python/python313.dll'):
+            for mask in (0x10000000, 0x1F01FF, 2, 4, 0x40000000):
+                for sid in (USER, 'S-1-3-4', 'S-1-1-0'):
+                    with self.subTest(child=child, mask=mask, sid=sid):
+                        self.api = FakeNative()
+                        self.api.nodes[p('C:/Python')][3].append((0, 27, 0x10000000, sid))
+                        self.api.nodes[p(child)][3].append((0, 16, mask, sid))
+                        with self.assertRaisesRegex(sec.SecurityError, 'Python tree entry: .*write rights'):
+                            with self.context():
+                                pass
+                        self.assertFalse(self.api.handles)
+
+    def test_runtime_child_creation_and_revalidation_still_blocked(self):
+        with self.context() as guard:
+            for directory in ('C:/Python', 'C:/Python/Lib'):
+                node = self.api.nodes[p(directory)]
+                node[3].append((0, 27, 0x10000000, USER))
+                guard.revalidate()  # Non-effective template alone is harmless here.
+                for mask in (2, 4, 0x40, 0x10000000):
+                    node[3].append((0, 19, mask, USER))
+                    with self.assertRaises(sec.SecurityError):
+                        guard.revalidate()
+                    node[3].pop()
+
+    def test_new_children_must_pass_actual_owner_and_acl(self):
+        with self.context() as guard:
+            self.api.nodes[p('C:/Overlays')][3].append((0, 27, 0x10000000, 'S-1-3-0'))
+            guard.check_path(p('C:/Overlays/new'))
+            self.api.add('C:/Overlays/new', True, owner=USER)
+            with self.assertRaises(sec.SecurityError):
+                guard.check_path(p('C:/Overlays/new'))
+            self.api.nodes[p('C:/Overlays/new')][2] = ADMIN
+            self.api.nodes[p('C:/Overlays/new')][3].append((0, 16, 0x1F01FF, USER))
+            with self.assertRaises(sec.SecurityError):
+                guard.check_path(p('C:/Overlays/new'))
+        self.assertFalse(self.api.handles)
+
     def test_runtime_dependency_owner(self):
         self.api.nodes[p('C:/Python/Lib/os.py')][2] = USER
         with self.assertRaises(sec.SecurityError):
