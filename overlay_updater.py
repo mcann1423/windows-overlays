@@ -491,9 +491,32 @@ def elevated_main():
         user = ctypes.WinDLL('user32', use_last_error=True)
         user.MessageBoxW.argtypes = [w.HWND, w.LPCWSTR, w.LPCWSTR, w.UINT]
         user.MessageBoxW.restype = ctypes.c_int
-        message = str(error) if isinstance(error, UpdateError) else 'Protected updater refused this installation or failed. Review permissions, backups and the retained lock. Do not restart overlays after incomplete rollback.'
+        message = str(error) if isinstance(error, UpdateError) else trust_failure(error) + ' Review permissions, backups and any retained lock before retrying.'
         user.MessageBoxW(None, message, 'Overlay updater', 0x10)
         return 20
+
+
+def trust_failure(error):
+    # Only our fixed-vocabulary SecurityError may be displayed verbatim. Never
+    # expose arbitrary OSError paths, environment values or exception messages.
+    if isinstance(error, windows_helper().SecurityError):
+        return str(error)
+    return "Unexpected trust-check failure (%s); no exception details disclosed." % type(error).__name__
+
+
+def diagnose_trust(local_details=False):
+    """Local, read-only: no UAC, network, config reads or ACL modifications."""
+    print("CPython version: %s.%s.%s" % sys.version_info[:3])
+    print("Executable (local only; redact your username before sharing):", sys.executable)
+    try:
+        with windows_helper().ProtectedInstall(Path(os.path.abspath(__file__)), Path(sys.executable),
+                                               local_details=local_details):
+            pass
+    except Exception as error:
+        print("Trust check FAIL:", trust_failure(error))
+        return 20
+    print("Trust check PASS (filesystem policy only, not an update test).")
+    return 0
 
 
 def update_checkout(directory):
@@ -513,8 +536,9 @@ def update_checkout(directory):
             return run_elevated(script, Path(sys.executable))
     except UpdateError:
         raise
-    except Exception:
-        raise UpdateError("Elevation refused: installation or Python trust checks failed. Use a protected all-users Python installation and administrator-managed application folder; see README. No automatic retry.") from None
+    except Exception as error:
+        raise UpdateError("Elevation refused: " + trust_failure(error) +
+                          " Run the read-only --diagnose-trust check in README. No automatic retry.") from None
 
 
 def attach_update_menu(root, script_file):
@@ -569,4 +593,6 @@ def attach_update_menu(root, script_file):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] in (["--diagnose-trust"], ["--diagnose-trust", "--local-details"]):
+        raise SystemExit(diagnose_trust(local_details="--local-details" in sys.argv))
     raise SystemExit(elevated_main())

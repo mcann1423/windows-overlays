@@ -128,6 +128,20 @@ class ElevationTests(unittest.TestCase):
             context.return_value.load_default_certs.assert_not_called()
             context.return_value.load_verify_locations.assert_called_once_with(cadata='PEM')
 
+    def test_sanitized_failure_and_read_only_diagnostic(self):
+        helper = u.windows_helper()
+        self.assertEqual(u.trust_failure(helper.SecurityError('application directory: untrusted owner')),
+                         'application directory: untrusted owner')
+        self.assertNotIn('secret', u.trust_failure(OSError('secret private path')))
+        guard = Mock()
+        guard.__enter__ = Mock(side_effect=helper.SecurityError('Python directory: untrusted owner'))
+        guard.__exit__ = Mock(return_value=False)
+        with patch.object(helper, 'ProtectedInstall', return_value=guard), patch.object(u, 'FolderUpdater') as update, patch.object(u, 'run_elevated') as elevate, patch('builtins.print') as output:
+            self.assertEqual(u.diagnose_trust(), 20)
+            update.assert_not_called()
+            elevate.assert_not_called()
+            self.assertIn('Python directory: untrusted owner', output.call_args.args)
+
     def test_child_rejects_extra_arguments_or_nonisolated(self):
         with patch.object(u.sys, 'platform', 'win32'),              patch.object(u.sys, 'argv', ['overlay_updater.py', u.CHILD_FLAG, '/target']),              patch.object(u, 'FolderUpdater') as folder:
             self.assertEqual(u.elevated_main(), 20)

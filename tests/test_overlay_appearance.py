@@ -153,8 +153,8 @@ class AppearanceTests(unittest.TestCase):
         canvas = Mock()
         canvas.bbox.return_value = (20, 20, 780, 1400)
         width, height, content = appearance.calendar_layout(self.root(), canvas, "long event " * 30, "Arial", 96, 220, 492)
-        self.assertEqual((width, height, content), (800, 600, 1420))
-        self.assertEqual(canvas.create_text.call_args.kwargs["width"], 760)
+        self.assertEqual((width, height, content), (220, 492, 1420))
+        self.assertEqual(canvas.create_text.call_args.kwargs["width"], 180)
         canvas.delete.assert_called_once()
 
     def test_deep_json_and_restart(self):
@@ -196,18 +196,50 @@ class AppearanceTests(unittest.TestCase):
             canvas.yview.return_value = (0.4, 0.8)
             canvas.bbox.return_value = (20, 20, 700, 1300)
             place = Mock(return_value=(700, 600))
-            env = dict(canvas=canvas, root=self.root(), EVENT_FONT_SIZE=20,
+            env = dict(canvas=canvas, root=self.root(), EVENT_FONT_SIZE=20, layout_in_progress=False,
                        window_w=700, window_h=600, default_window_w=220,
                        default_window_h=492, current_schedule_text='unchanged',
-                       FONT_FAMILY='Arial', redraw_calendar=Mock(),
+                       FONT_FAMILY='Arial', redraw_calendar=Mock(), POSITION='left',
+                       calendar_zone=Mock(return_value=(0,0,266,600)),
                        place_within_screen=place, calendar_layout=Mock(return_value=(700,600,1300)))
             exec(compile(ast.Module(body=[function], type_ignores=[]), name, 'exec'), env)
             env['apply_appearance']({'font_size':20}, refresh=True)
-            place.assert_not_called()
+            place.assert_called_once()
+            place.reset_mock()
             canvas.yview_moveto.assert_called_with(0.4)
             env['apply_appearance']({'font_size':48})
             place.assert_called_once()
             canvas.yview_moveto.assert_called_with(0)
+
+    def test_fourteen_preset_and_live_persistence(self):
+        with patch.object(appearance.tk, "Menu") as menu, patch.object(appearance.tk, "IntVar"), patch.object(appearance.tk, "StringVar"):
+            for default in (20, 60, 72):
+                appearance.Appearance(self.root(), Mock(), "overlay.py", default, Mock())
+                self.assertIn(14, [c.kwargs["value"] for c in menu.return_value.add_radiobutton.call_args_list])
+        controller = self.controller()
+        controller.set_size(14)
+        self.assertEqual(appearance.load_settings(controller.path, 72)["font_size"], 14)
+
+    @patch.object(appearance.tkfont, "Font", FakeFont)
+    def test_geometry_matrix_and_no_clock_drift(self):
+        root, canvas = self.root(), Mock()
+        canvas.bbox.return_value = (20,20,200,5000)
+        for bounds in ((0,0,800,600), (0,0,1920,1040), (-1280,40,0,1024)):
+            with patch.object(appearance, "monitor_bounds", return_value=bounds):
+                for size in (8,14,20,48,72,144):
+                    for theme in appearance.CLOCK_THEMES.values():
+                        _, width, height = appearance.fit_single_line(root, theme[1], size, "12:59 PM", (92,52))
+                        for anchor in (None, (-900,300)):
+                            first = appearance.clock_position(bounds, width, height, anchor)
+                            appearance.clock_position(bounds, width+50, height+20, anchor)
+                            self.assertEqual(first, appearance.clock_position(bounds, width, height, anchor))
+                        x,y = appearance.clock_position(bounds, width,height)
+                        self.assertLessEqual(abs(x+width/2-(bounds[0]+bounds[2])/2),0.5)
+                    for side in ("left","right"):
+                        zone = appearance.calendar_zone(root, side)
+                        width,height,_ = appearance.calendar_layout(root,canvas,"long "*100,"Arial",size,zone[2]-zone[0]-40,492)
+                        appearance.place_within_screen(root,width,height,(9999,-9999),bounds=zone)
+                        self.assertEqual(root.geometry.call_args.args[0], f"{width}x{height}+{zone[2]-width}+{zone[1]}")
 
     def test_all_published_scripts_integrate_without_network(self):
         base = Path(appearance.__file__).parent

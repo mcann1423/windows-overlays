@@ -57,7 +57,7 @@ package them in archives for publication.
 
 ## Appearance controls
 
-Right-click visible text to select **Font size** on any overlay. Choose a preset,
+Right-click visible text to select **Font size** on any overlay. Choose a preset (including **14 pt**),
 **Custom…** (8–144 pt), or **Reset default** (clock/IP: 72 pt; calendars: 20 pt).
 The clock also offers **Theme → Default, Halloween, Fall, Winter**, using the
 original colors and optional fonts listed above. Missing fonts show a warning
@@ -69,8 +69,12 @@ need no administrator approval and never modify `calendar_config.json` or the
 Program Files installation. Malformed settings fall back to defaults. Multiple
 instances of the same overlay use last-save-wins; different overlays have separate
 files. Windows are resized/repositioned within the current Windows monitor; clock/IP text
-may render smaller to fit a small screen. Large calendar content can be scrolled
-with the mouse wheel. Dragging, hover-close and **Check for updates…** remain.
+may render smaller to fit a small screen. The clock retains its top-third center,
+or its dragged center, across font/theme changes without drift. Calendars stay
+inside their original left/right third, with 20-pixel side margins and an
+82%-height viewport relative to the monitor work area. Text wraps/clips inside
+that column and scrolls with the mouse wheel. Dragging stays within the assigned
+third. Appearance changes need no restart.
 
 ## Local calendar configuration
 
@@ -254,3 +258,41 @@ static compilation do not replace a native Windows GUI smoke test of menu
 placement, transparency, antivirus/file-sharing behavior and multiple overlays.
 Python syntax validation uses installed Python; future code requiring a newer
 Python will fail safely until Python is upgraded.
+
+## Diagnosing a refused protected update
+
+Do **not** reinstall Python or loosen ACLs based only on the old generic refusal.
+A bug in 0251fae compared lowercased guarded paths with mixed-case DLLs/Lib
+landmarks, falsely refusing a protected standard Python installation that reached
+that check. This is corrected without relaxing the security policy. Other checks
+can still fail; native Windows/UAC validation is required on your PC.
+
+After manually deploying these files, open ordinary (not administrator) PowerShell.
+Set $python to the full python.exe in the **same installation your Startup launcher
+uses** (not a guessed path, Store alias or different Python), then run:
+
+    & $python -I -S -B 'C:\Program Files\Clock Overlays\overlay_updater.py' --diagnose-trust
+
+This only reads trust metadata: no UAC, download, calendar feed/config read, ACL
+change or update. It prints Python version, executable and exact policy reason
+with a sanitized object category. Share the version and Trust check line; redact
+usernames in the executable path. If needed, append --local-details to display
+the exact failing path **locally**. Do not publish this output unredacted. An
+administrator can inspect that object with:
+
+    Get-Acl -LiteralPath '<exact local path>' | Format-List Owner,AccessToString
+
+Do not blindly change ownership/ACLs: untrusted owners, write grants, unsupported
+ACLs, locked files, runtime layouts or Python versions need their own remedies.
+
+**Manual deployment while updater is blocked:** close all four overlays; download
+the repository ZIP from a reviewed commit and extract to a temporary folder. Use
+Explorer's administrator copy prompt to replace only overlay_updater.py,
+overlay_windows.py, overlay_appearance.py, clock_overlay_v3.py, ip_overlay.py,
+cchl_cal_overlay.py, ceel_cal_overlay.py, README.md and calendar_config.example.json
+in C:\Program Files\Clock Overlays. Keep calendar_config.json, all .ttf fonts,
+per-user appearance settings and the separate Startup launcher untouched. Back up
+replaced code. Existing updater baselines may report local edits after manual
+replacement; do not delete locks/backups or force through failed transactions.
+Run the diagnostic, then restart overlays normally, not as administrator. No
+Windows reboot or Python reinstall is required merely to deploy this fix.

@@ -45,7 +45,7 @@ def _acl_policy(owner, aces, directory, inheritance=False, ancestor=False):
     if aces is None:
         raise SecurityError("Installation object has a missing or NULL DACL.")
     inherited_admin = False
-    for kind, flags, mask, sid in aces:
+    for index, (kind, flags, mask, sid) in enumerate(aces):
         # Only conventional ALLOW and DENY ACEs are understood. No callback,
         # object, conditional, compound, or unknown ACE is interpreted optimistically.
         if kind not in (0, 1) or flags & ~0x1F:
@@ -56,7 +56,7 @@ def _acl_policy(owner, aces, directory, inheritance=False, ancestor=False):
         allowed = READ_ONLY | (0x4 if ancestor else 0)
         effective = not flags & 8  # INHERIT_ONLY does not apply to this object.
         if kind == 0 and sid not in TRUSTED and mask & ~allowed and (effective or not ancestor):
-            raise SecurityError("Installation ACL grants untrusted write rights.")
+            raise SecurityError("Installation ACL grants untrusted write rights (ACE %d, mask 0x%08X, flags 0x%02X)." % (index, mask, flags))
         # Require an ordinary inheritable full-control grant to a trusted
         # principal. CREATOR OWNER is intentionally not accepted.
         if (kind == 0 and sid in TRUSTED and flags & 3 == 3
@@ -176,7 +176,7 @@ class _Native:
         status = self.a.GetSecurityInfo(handle, 1, 5, ctypes.byref(owner), None,
                                        ctypes.byref(dacl), None, ctypes.byref(sd))
         if status:
-            raise SecurityError("Cannot inspect installation security descriptor.")
+            raise SecurityError("Cannot inspect installation security descriptor (Windows error %d)." % status)
         try:
             aces = None
             if dacl.value:
@@ -222,7 +222,8 @@ class ProtectedInstall:
     check_path accepts missing final paths only under trusted inheritable dirs;
     call again after creation. Do not set custom security descriptors on creates.
     """
-    def __init__(self, script_path, interpreter, *, _api=None):
+    def __init__(self, script_path, interpreter, *, _api=None, local_details=False):
+        self.local_details = local_details
         self.script = _path(script_path)
         self.interpreter = _path(interpreter)
         self.install = ntpath.dirname(self.script)
@@ -236,7 +237,33 @@ class ProtectedInstall:
         self.active = False
         self.released = False
 
+    def _label(self, path):
+        if self.local_details:
+            return path
+        if path == self.runtime:
+            return "Python directory"
+        if path == self.install:
+            return "application directory"
+        if path == self.script:
+            return "updater source"
+        if path == self.interpreter:
+            return "Python executable"
+        if _under(path, self.runtime):
+            return "Python tree entry"
+        if _under(path, self.install):
+            return "managed application entry"
+        return "installation ancestor (depth %d)" % len(path[3:].split(chr(92)))
+
     def _guard(self, path, directory, writable=False, ancestor=False):
+        try:
+            self._guard_impl(path, directory, writable, ancestor)
+        except SecurityError as error:
+            raise SecurityError(self._label(path) + ": " + str(error)) from None
+        except OSError as error:
+            raise SecurityError(self._label(path) + ": filesystem inspection failed (Windows error %s)." %
+                                getattr(error, 'winerror', None)) from None
+
+    def _guard_impl(self, path, directory, writable=False, ancestor=False):
         if path in self.guards:
             self._validate(path, self.guards[path], directory, writable)
             return
@@ -256,6 +283,12 @@ class ProtectedInstall:
         _acl_policy(info[2], info[3], directory, writable, ancestor)
 
     def _validate(self, path, guard, directory=None, writable=None):
+        try:
+            self._validate_impl(path, guard, directory, writable)
+        except SecurityError as error:
+            raise SecurityError(self._label(path) + ": " + str(error)) from None
+
+    def _validate_impl(self, path, guard, directory=None, writable=None):
         handle, identity, was_dir, was_writable, ancestor = guard
         info = self.api.inspect(handle)
         self._policy(info, was_dir if directory is None else directory,
@@ -302,6 +335,12 @@ class ProtectedInstall:
                         or name.casefold().endswith("._pth")):
                     raise SecurityError("Venv and custom Python path configurations are unsupported.")
 
+    def _runtime_landmarks(self, version):
+        for relative in ('DLLs', 'Lib\\os.py', 'Lib\\encodings\\__init__.py',
+                         'python%d%d.dll' % version):
+            if _path(ntpath.join(self.runtime, relative)) not in self.guards:
+                raise SecurityError("Standard protected CPython runtime landmark missing: " + relative)
+
     def __enter__(self):
         if self.active:
             raise SecurityError("Protected installation context already active.")
@@ -327,12 +366,7 @@ class ProtectedInstall:
                 if (sys.implementation.name != 'cpython' or hasattr(sys, 'gettotalrefcount')
                         or not (3, 11) <= sys.version_info[:2] <= (3, 14)):
                     raise SecurityError("Only standard release CPython is supported.")
-                for required in (ntpath.join(self.runtime, 'DLLs'),
-                                 ntpath.join(self.runtime, 'Lib', 'os.py'),
-                                 ntpath.join(self.runtime, 'Lib', 'encodings', '__init__.py'),
-                                 ntpath.join(self.runtime, 'python%d%d.dll' % sys.version_info[:2])):
-                    if required not in self.guards:
-                        raise SecurityError("Standard protected CPython runtime landmarks missing.")
+                self._runtime_landmarks(sys.version_info[:2])
                 if self.api.loaded_runtime() != ntpath.join(self.runtime, 'python%d%d.dll' % sys.version_info[:2]):
                     raise SecurityError('Loaded Python runtime DLL is outside the guarded layout.')
                 if _path(sys.base_prefix) != self.runtime or sys.prefix != sys.base_prefix:

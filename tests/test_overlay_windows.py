@@ -170,6 +170,25 @@ class ContextTests(unittest.TestCase):
             with self.assertRaises(sec.SecurityError):
                 guard.release_temporary(p('C:/Overlays/.overlay-update-backups'))
 
+    def test_landmarks_normalize_windows_case(self):
+        self.api.add('C:/Python/DLLs', True)
+        self.api.add('C:/Python/Lib/encodings', True)
+        self.api.add('C:/Python/Lib/encodings/__init__.py', False)
+        with self.context() as guard:
+            guard._runtime_landmarks((3,13))
+            del guard.guards[p('C:/Python/Lib/os.py')]
+            with self.assertRaisesRegex(sec.SecurityError, 'landmark missing: Lib'):
+                guard._runtime_landmarks((3,13))
+
+    def test_diagnostic_scope_mask_and_no_private_path(self):
+        self.api.nodes[p('C:/Python/Lib/os.py')][3].append((0,0,2,USER))
+        with self.assertRaisesRegex(sec.SecurityError, r'Python tree entry: .*ACE 2, mask 0x00000002') as error:
+            with self.context():
+                pass
+        self.assertNotIn(USER,str(error.exception))
+        self.assertNotIn('os.py',str(error.exception))
+        self.assertFalse(self.api.handles)
+
     def test_inactive(self):
         with self.assertRaises(sec.SecurityError):
             self.context().check_path(SCRIPT)

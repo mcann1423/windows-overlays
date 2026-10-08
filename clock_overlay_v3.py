@@ -14,7 +14,7 @@ FONT_FAMILY = "Arial Rounded MT Bold"
 TEXT_COLOR = "#E2E8F0"
 OUTLINE_COLOR = "#0F172A"
 from overlay_appearance import (Appearance, CLOCK_THEMES, local_clock_font,
-                                fit_single_line, place_within_screen)
+                                fit_single_line, place_within_screen, monitor_bounds, clock_position)
 
 root = tk.Tk()
 update_menu = attach_update_menu(root, __file__)
@@ -78,9 +78,11 @@ def start_move(event):
 
 
 def do_move(event):
+  global clock_anchor
   x = root.winfo_x() + (event.x - root.x)
   y = root.winfo_y() + (event.y - root.y)
-  root.geometry(f"+{x}+{y}")
+  place_within_screen(root, window_w, window_h, (x, y))
+  clock_anchor = (root.winfo_x() + window_w / 2, root.winfo_y() + window_h / 2)
 
 
 canvas.bind("<ButtonPress-1>", start_move)
@@ -133,6 +135,7 @@ def redraw_clock(time_str):
 
 
 active_theme = None
+clock_anchor = None
 
 
 def apply_appearance(settings, initial=False):
@@ -148,16 +151,14 @@ def apply_appearance(settings, initial=False):
   widest = max(samples, key=font.measure)
   FONT_SIZE, width, height = fit_single_line(root, FONT_FAMILY, settings["font_size"],
       widest, (OUTLINE_WEIGHT * 4 + 80, OUTLINE_WEIGHT * 4 + 40))
-  position = None
-  if initial:
-    position = ((root.winfo_screenwidth() - width) // 2,
-                max(0, (root.winfo_screenheight() // 3 - height) // 2))
+  position = clock_position(monitor_bounds(root), width, height, clock_anchor)
   window_w, window_h = place_within_screen(root, width, height, position)
   redraw_clock(current_time_str or strftime("%I:%M %p").lstrip("0"))
 
 
 appearance = Appearance(root, update_menu, __file__, 72, apply_appearance, clock=True)
 apply_appearance(appearance.settings, initial=True)
+canvas.bind("<Configure>", lambda event: redraw_clock(current_time_str or strftime("%I:%M %p").lstrip("0")))
 
 
 def update_time():

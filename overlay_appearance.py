@@ -96,7 +96,7 @@ class Appearance:
         self.theme_var = tk.StringVar(master=root, value=self.settings["theme"])
         menu.add_separator()
         sizes = tk.Menu(menu, tearoff=False)
-        for size in sorted({12, 16, 20, 24, 32, 48, 60, 72, 96, 120, 144, default_size}):
+        for size in sorted({12, 14, 16, 20, 24, 32, 48, 60, 72, 96, 120, 144, default_size}):
             sizes.add_radiobutton(label=f"{size} pt", variable=self.size_var, value=size,
                                   command=lambda value=size: self.set_size(value))
         sizes.add_command(label="Custom…", command=self.custom_size)
@@ -161,8 +161,8 @@ def monitor_bounds(root):
     return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
 
 
-def place_within_screen(root, width, height, position=None):
-    left, top, right, bottom = monitor_bounds(root)
+def place_within_screen(root, width, height, position=None, bounds=None):
+    left, top, right, bottom = bounds or monitor_bounds(root)
     sw, sh = right - left, bottom - top
     width, height = max(1, min(int(width), sw)), max(1, min(int(height), sh))
     x, y = position if position is not None else (root.winfo_x(), root.winfo_y())
@@ -175,25 +175,40 @@ def place_within_screen(root, width, height, position=None):
 def fit_single_line(root, family, size, text, padding, weight="normal"):
     """Keep the selected size in settings; shrink rendering only on small screens."""
     font = tkfont.Font(root=root, family=family, size=size, weight=weight)
+    left, top, right, bottom = monitor_bounds(root)
     while size > 1:
         width = font.measure(text) + padding[0]
         height = font.metrics("linespace") + padding[1]
-        if width <= root.winfo_screenwidth() and height <= root.winfo_screenheight():
+        if width <= right - left and height <= bottom - top:
             break
         size -= 1
         font.configure(size=size)
     return size, font.measure(text) + padding[0], font.metrics("linespace") + padding[1]
 
 
+def calendar_zone(root, position):
+    """Original three columns, relative to the current monitor work area."""
+    left, top, right, bottom = monitor_bounds(root)
+    index = {"left": 0, "center": 1, "right": 2}.get(position.lower().strip(), 2)
+    span = right - left
+    return left + span * index // 3, top, left + span * (index + 1) // 3, bottom
+
+
 def calendar_layout(root, canvas, text, family, size, default_width, default_height):
-    """Measure Tk's actual wrapped text; grow within the screen, then allow scrolling."""
-    font = tkfont.Font(root=root, family=family, size=size, weight="bold")
-    longest = max((font.measure(line) for line in text.splitlines()), default=0)
-    width = min(root.winfo_screenwidth(), max(default_width, longest + 40))
+    """Wrap at the designated column width; never grow horizontally for text."""
+    left, top, right, bottom = monitor_bounds(root)
+    width = max(1, min(default_width, (right - left) // 3))
     item = canvas.create_text(20, 20, text=text, font=(family, size, "bold"),
                               anchor="nw", width=max(1, width - 40))
     bounds = canvas.bbox(item)
     canvas.delete(item)
     content_height = (bounds[3] + 20) if bounds else 40
-    height = max(default_height, content_height)
-    return width, min(root.winfo_screenheight(), height), content_height
+    return width, max(1, min(bottom - top, default_height)), content_height
+
+
+def clock_position(bounds, width, height, anchor=None):
+    """Keep an invariant center, not the previous size's top-left corner."""
+    left, top, right, bottom = bounds
+    cx, cy = anchor if anchor is not None else ((left + right) / 2,
+                                               top + (bottom - top) // 3 / 2)
+    return round(cx - width / 2), round(cy - height / 2)

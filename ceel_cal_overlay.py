@@ -7,7 +7,7 @@ import re
 import sys
 import tkinter as tk
 from overlay_updater import attach_update_menu
-from overlay_appearance import Appearance, calendar_layout, place_within_screen
+from overlay_appearance import Appearance, calendar_layout, calendar_zone, place_within_screen
 import tkinter.font as tkfont
 import urllib.request
 
@@ -235,7 +235,8 @@ def start_move(event):
 def do_move(event):
   x = root.winfo_x() + (event.x - root.x)
   y = root.winfo_y() + (event.y - root.y)
-  root.geometry(f"+{x}+{y}")
+  place_within_screen(root, window_w, window_h, (x, y),
+                      bounds=calendar_zone(root, POSITION))
 
 
 canvas.bind("<ButtonPress-1>", start_move)
@@ -291,49 +292,36 @@ def redraw_calendar(full_text):
 # ==============================================================================
 # DYNAMIC POSITIONING LOGIC (3 EQUAL VERTICAL ZONES)
 # ==============================================================================
-screen_w = root.winfo_screenwidth()
-screen_h = root.winfo_screenheight()
-
-zone_width = screen_w // 3  # Screen divided into 3 equal columns
-
-window_w = zone_width - 40  # Window width fits within a single zone
-window_h = int(screen_h * 0.82)  # 82% of screen height
-
-pos_choice = POSITION.lower().strip()
-
-if pos_choice == "left":
-  zone_start_x = 0
-elif pos_choice == "center":
-  zone_start_x = zone_width
-else:  # Defaults to "right"
-  zone_start_x = zone_width * 2
-
-pos_x = zone_start_x + (zone_width - window_w) // 2  # Center inside target zone
-pos_y = (screen_h - window_h) // 2  # Vertically centered
-
-default_window_w, default_window_h = window_w, window_h
-window_w, window_h = place_within_screen(root, window_w, window_h, (pos_x, pos_y))
+zone = calendar_zone(root, POSITION)
+default_window_w = max(1, zone[2] - zone[0] - 40)
+default_window_h = max(1, int((zone[3] - zone[1]) * 0.82))
+window_w, window_h = place_within_screen(root, default_window_w, default_window_h,
+    (zone[0] + 20, zone[1] + (zone[3] - zone[1] - default_window_h) // 2), bounds=zone)
 current_schedule_text = ""
+layout_in_progress = False
 
 
 def apply_appearance(settings, refresh=False):
-  global EVENT_FONT_SIZE, window_w, window_h
-  previous_scroll = canvas.yview()[0] if refresh else 0
-  EVENT_FONT_SIZE = settings["font_size"]
-  if EVENT_FONT_SIZE == 20:
-    # Reset restores the original three-zone dimensions.
-    width, height = default_window_w, default_window_h
-  else:
+  global EVENT_FONT_SIZE, window_w, window_h, layout_in_progress
+  if layout_in_progress:
+    return
+  layout_in_progress = True
+  try:
+    previous_scroll = canvas.yview()[0] if refresh else 0
+    EVENT_FONT_SIZE = settings["font_size"]
+    zone = calendar_zone(root, POSITION)
     width, height, _ = calendar_layout(root, canvas, current_schedule_text,
-        FONT_FAMILY, EVENT_FONT_SIZE, default_window_w, default_window_h)
-  if not refresh:
-    window_w, window_h = place_within_screen(root, width, height)
-  canvas.yview_moveto(0)
-  redraw_calendar(current_schedule_text)
-  bounds = canvas.bbox("all")
-  canvas.configure(scrollregion=(0, 0, window_w,
-      max(window_h, bounds[3] + 20 if bounds else 0)))
-  canvas.yview_moveto(previous_scroll)
+        FONT_FAMILY, EVENT_FONT_SIZE, max(1, zone[2] - zone[0] - 40),
+        max(1, int((zone[3] - zone[1]) * 0.82)))
+    window_w, window_h = place_within_screen(root, width, height, bounds=zone)
+    canvas.yview_moveto(0)
+    redraw_calendar(current_schedule_text)
+    bounds = canvas.bbox("all")
+    canvas.configure(scrollregion=(0, 0, window_w,
+        max(window_h, bounds[3] + 20 if bounds else 0)))
+    canvas.yview_moveto(previous_scroll)
+  finally:
+    layout_in_progress = False
 
 
 def scroll_calendar(event):
@@ -346,6 +334,14 @@ canvas.bind("<Button-4>", lambda event: canvas.yview_scroll(-1, "units"))
 canvas.bind("<Button-5>", lambda event: canvas.yview_scroll(1, "units"))
 appearance = Appearance(root, update_menu, __file__, 20, apply_appearance)
 EVENT_FONT_SIZE = appearance.settings["font_size"]
+
+
+def reflow_calendar(event):
+  if not layout_in_progress and event.widget is canvas and (event.width != window_w or event.height != window_h):
+    root.after_idle(lambda: apply_appearance(appearance.settings, refresh=True))
+
+
+canvas.bind("<Configure>", reflow_calendar)
 
 
 def update_calendar():
