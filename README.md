@@ -156,7 +156,7 @@ unchanged; wait and retry for rate limits, without signing in.
 
 ### Program Files and administrator approval
 
-For an existing installation at **C:\Program Files\Clock Overlays**, keep the
+For an existing installation at **C:\Program Files\Clock Overlay**, keep the
 actual Python scripts and both updater modules there. The Startup folder should
 contain only your existing launcher/shortcut: **do not change it or run overlays
 as administrator**. Use a standard, all-users CPython installation, not a per-user
@@ -200,7 +200,7 @@ is installed, and no Git/authentication or pip is needed on the target computer.
 The older updater cannot request UAC, and its seven-file manifest cannot install
 the new helpers. Close all overlays. Download the public repository ZIP, inspect
 it, and back up existing application files and updater metadata. Use **Explorer**
-to copy the nine managed files into `C:\Program Files\Clock Overlays`, accepting
+to copy the nine managed files into `C:\Program Files\Clock Overlay`, accepting
 Explorer's administrator approval for the copy. These are both updater modules, the appearance helper,
 the four current overlays, README, and `calendar_config.example.json`. Preserve
 `calendar_config.json` (the exact private configuration filename), all fonts,
@@ -274,6 +274,57 @@ placement, transparency, antivirus/file-sharing behavior and multiple overlays.
 Python syntax validation uses installed Python; future code requiring a newer
 Python will fail safely until Python is upgraded.
 
+## Machine TLS enumeration repair
+
+The old "Cannot enumerate machine TLS trust store" error can be caused by an
+updater bug, not bad certificates or permissions: CPython ctypes returns the
+normal end-of-store code CRYPT_E_NOT_FOUND (0x80092004) as the signed integer
+-2146885628. The helper now normalizes the saved error to an unsigned 32-bit
+value before comparing it. Actual open/enumeration failures report a sanitized
+hexadecimal Win32 code (for example 0x00000005 means access denied). Empty stores
+still fail closed. TLS certificate and hostname verification remain enabled;
+only the read-only Local Machine ROOT store is used, never per-user roots or
+SSL_CERT_FILE/DIR. No certificate, ACL, Python reinstall or UI changes are needed
+merely to deploy this code fix.
+
+**Minimal deployment for an otherwise current installation:** close all four
+overlays and confirm no updater is running. Back up the installed
+**overlay_windows.py** and any **.overlay-update.json** outside the installation.
+Download overlay_windows.py from the reviewed fixed repository commit and use
+Explorer's administrator copy prompt to replace only that helper in
+**C:\Program Files\Clock Overlay** (or your actual application folder). Tests
+and this README need not be installed. Do not overwrite calendar_config.json,
+fonts, per-user appearance settings or the separate Startup launcher.
+
+Manual replacement deliberately breaks an existing installed-hash baseline.
+After preserving/reviewing any local code edits, and only after confirming there
+is no unfinished transaction, move the old .overlay-update.json outside the
+installation (keep the backup). The next confirmed menu update is a first-use
+update: it may replace all nine managed files and records a fresh baseline.
+Restart overlays normally, not elevated, and retry the update. Much older
+seven-file installs still need the full bootstrap described above.
+
+**Recovery/order:** TLS context construction occurs after this transaction has
+created its lock and read/validated the installed baseline, but before the first
+HTTP connection, staging, backups or managed-file replacement. On an ordinary
+TLS exception the transaction removes its own lock. This specific failure does
+not imply partial replacement. An existing lock blocks entry and is never
+removed by this path; abrupt termination or a separate failed transaction can
+still leave one. Do not blindly clear a lock or backups: follow the existing
+journal/rollback recovery steps before migrating a baseline or retrying.
+
+The fix has mocked Linux regressions for signed/unsigned termination, empty
+stores, real-error paths, context ownership, machine-only SSL verification and
+transaction cleanup. Native Windows/CPython 3.14/UAC validation is still needed.
+If a new hexadecimal error persists, report that code; the filesystem-only
+--diagnose-trust check below does not test TLS.
+
+Implementation references: Microsoft's
+[CertEnumCertificatesInStore](https://learn.microsoft.com/en-us/windows/win32/api/wincrypt/nf-wincrypt-certenumcertificatesinstore),
+[CertOpenStore](https://learn.microsoft.com/en-us/windows/win32/api/wincrypt/nf-wincrypt-certopenstore),
+[CertCloseStore](https://learn.microsoft.com/en-us/windows/win32/api/wincrypt/nf-wincrypt-certclosestore),
+and [ctypes saved last-error semantics](https://docs.python.org/3.14/library/ctypes.html#ctypes.get_last_error).
+
 ## Diagnosing a refused protected update
 
 Do **not** reinstall Python or loosen ACLs based only on the old generic refusal.
@@ -286,7 +337,7 @@ After manually deploying these files, open ordinary (not administrator) PowerShe
 Set $python to the full python.exe in the **same installation your Startup launcher
 uses** (not a guessed path, Store alias or different Python), then run:
 
-    & $python -I -S -B 'C:\Program Files\Clock Overlays\overlay_updater.py' --diagnose-trust
+    & $python -I -S -B 'C:\Program Files\Clock Overlay\overlay_updater.py' --diagnose-trust
 
 This only reads trust metadata: no UAC, download, calendar feed/config read, ACL
 change or update. It prints Python version, executable and exact policy reason
@@ -305,7 +356,7 @@ the repository ZIP from a reviewed commit and extract to a temporary folder. Use
 Explorer's administrator copy prompt to replace only overlay_updater.py,
 overlay_windows.py, overlay_appearance.py, clock_overlay_v3.py, ip_overlay.py,
 cchl_cal_overlay.py, ceel_cal_overlay.py, README.md and calendar_config.example.json
-in C:\Program Files\Clock Overlays. Keep calendar_config.json, all .ttf fonts,
+in C:\Program Files\Clock Overlay. Keep calendar_config.json, all .ttf fonts,
 per-user appearance settings and the separate Startup launcher untouched. Back up
 replaced code. Existing updater baselines may report local edits after manual
 replacement; do not delete locks/backups or force through failed transactions.

@@ -513,15 +513,23 @@ def machine_root_certificates():
                                None, 0x20000 | 0x4000 | 0x8000,
                                ctypes.cast(ctypes.c_wchar_p('ROOT'), w.LPVOID))
     if not store:
-        raise SecurityError('Cannot open machine TLS trust store.')
+        error = ctypes.get_last_error() & 0xFFFFFFFF
+        raise SecurityError('Cannot open machine TLS trust store (Win32 0x%08X).' % error)
     certificate = None
     roots = []
     try:
         while True:
+            # Crypt32 consumes the previous context even on native failure.
+            # Keep only its returned context for the finally-block to free.
             certificate = crypt.CertEnumCertificatesInStore(store, certificate)
             if not certificate:
-                if ctypes.get_last_error() != 0x80092004:  # CRYPT_E_NOT_FOUND
-                    raise SecurityError('Cannot enumerate machine TLS trust store.')
+                # use_last_error=True saves the native DWORD in ctypes' private
+                # signed int slot. Normalize BEFORE comparing HRESULT-style
+                # codes; CRYPT_E_NOT_FOUND otherwise looks like -2146885628.
+                # Read immediately, before any cleanup call can overwrite it.
+                error = ctypes.get_last_error() & 0xFFFFFFFF
+                if error != 0x80092004:  # CRYPT_E_NOT_FOUND (system ROOT store)
+                    raise SecurityError('Cannot enumerate machine TLS trust store (Win32 0x%08X).' % error)
                 break
             if certificate.contents.encoding & 1:
                 roots.append(ctypes.string_at(certificate.contents.data, certificate.contents.size))
@@ -530,5 +538,5 @@ def machine_root_certificates():
             crypt.CertFreeCertificateContext(certificate)
         crypt.CertCloseStore(store, 0)
     if not roots:
-        raise SecurityError('Machine TLS trust store is empty.')
+        raise SecurityError('Machine TLS trust store contains no X.509 root certificates.')
     return roots
