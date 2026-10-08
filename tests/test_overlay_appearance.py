@@ -64,8 +64,8 @@ class AppearanceTests(unittest.TestCase):
         two = appearance.settings_path("/Program Files/Overlays/ceel_cal_overlay.py")
         self.assertEqual(one, self.base / "DesktopOverlays/ip_overlay.json")
         self.assertNotEqual(one, two)
-        appearance.save_settings(one, {"font_size": 96, "theme": "Winter"})
-        self.assertEqual(appearance.load_settings(one, 72), {"font_size": 96, "theme": "Winter"})
+        appearance.save_settings(one, {"font_size": 96, "theme": "Winter", "outline_weight": 3})
+        self.assertEqual(appearance.load_settings(one, 72), {"font_size": 96, "theme": "Winter", "outline_weight": 3})
         self.assertEqual(appearance.load_settings(two, 20)["font_size"], 20)
         self.assertFalse(list(one.parent.glob("*.tmp")))
 
@@ -73,7 +73,7 @@ class AppearanceTests(unittest.TestCase):
         path = self.base / "settings.json"
         for value in ['{', '[]', '{"font_size":true,"theme":[]}', '{"font_size":10000,"theme":"bogus"}', '{"font_size":"20"}']:
             path.write_text(value)
-            self.assertEqual(appearance.load_settings(path, 72), {"font_size": 72, "theme": "Default"})
+            self.assertEqual(appearance.load_settings(path, 72), {"font_size": 72, "theme": "Default", "outline_weight": 3})
 
     def test_failed_atomic_replace_preserves_previous_file(self):
         path = self.base / "settings.json"
@@ -89,12 +89,57 @@ class AppearanceTests(unittest.TestCase):
         controller.set_size(96)
         controller.apply.assert_called_once_with(controller.settings)
         controller.set_theme("Winter")
-        self.assertEqual(appearance.load_settings(controller.path, 72), {"font_size": 96, "theme": "Winter"})
+        self.assertEqual(appearance.load_settings(controller.path, 72), {"font_size": 96, "theme": "Winter", "outline_weight": 3})
         controller.set_size(controller.default_size)
         self.assertEqual(controller.settings["font_size"], 72)
         for value in (0, 7, 145, True, "20", 20.5):
             controller.set_size(value)
         self.assertEqual(controller.settings["font_size"], 72)
+
+    def test_outline_bounds_old_settings_restart_and_redraw(self):
+        path = appearance.settings_path("clock_overlay_v3.py")
+        appearance.save_settings(path, {"font_size": 48, "theme": "Fall"})
+        controller = self.controller(True)
+        self.assertEqual(controller.settings["outline_weight"], 3)
+        self.assertEqual(appearance.load_settings(path, 20, 5)["outline_weight"], 5)
+        for weight in range(6):
+            controller.apply.reset_mock()
+            controller.set_outline(weight)
+            controller.apply.assert_called_once_with(controller.settings)
+            self.assertEqual(self.controller(True).settings["outline_weight"], weight)
+        for invalid in (-1, 6, True, "3", 3.5, None):
+            controller.apply.reset_mock()
+            controller.set_outline(invalid)
+            controller.apply.assert_not_called()
+            appearance.save_settings(path, {"outline_weight": invalid})
+            self.assertEqual(appearance.load_settings(path, 20, 5)["outline_weight"], 5)
+
+    def test_outline_padding_and_calendar_render_budget(self):
+        self.assertEqual(appearance.outline_padding(52, 32), (52, 32))
+        self.assertEqual(appearance.outline_padding(0, 0), (14, 14))
+        base = Path(appearance.__file__).parent
+        for name, function_name in (("clock_overlay_v3.py", "redraw_clock"),
+                                    ("ip_overlay.py", "redraw_ip"),
+                                    ("cchl_cal_overlay.py", "redraw_calendar"),
+                                    ("ceel_cal_overlay.py", "redraw_calendar")):
+            tree = ast.parse((base / name).read_text())
+            function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function_name)
+            for weight in (0, 5):
+                canvas = Mock()
+                canvas.winfo_width.return_value = 600
+                canvas.winfo_height.return_value = 400
+                env = dict(canvas=canvas, window_w=600, window_h=400, OUTLINE_WEIGHT=weight,
+                           FONT_SIZE=20, EVENT_FONT_SIZE=20, FONT_FAMILY="Arial",
+                           OUTLINE_COLOR="black", TEXT_COLOR="white")
+                exec(compile(ast.Module(body=[function], type_ignores=[]), name, 'exec'), env)
+                env[function_name]("Test")
+                self.assertLessEqual(canvas.create_text.call_count, 89)
+                self.assertEqual(canvas.create_text.call_count == 1, weight == 0)
+                if "cal_overlay" in name:
+                    for call in canvas.create_text.call_args_list:
+                        x, y = call.args
+                        self.assertGreaterEqual(min(x,y), 15)
+                        self.assertLessEqual(x + call.kwargs['width'], 585)
 
     def test_custom_size_cancel_and_bounds(self):
         controller = self.controller()
@@ -115,7 +160,7 @@ class AppearanceTests(unittest.TestCase):
         menu = Mock()
         with patch.object(appearance.tk, "Menu"), patch.object(appearance.tk, "IntVar"), patch.object(appearance.tk, "StringVar"):
             appearance.Appearance(self.root(), menu, "clock.py", 72, Mock(), True)
-        self.assertEqual([c.kwargs["label"] for c in menu.add_cascade.call_args_list], ["Font size", "Theme"])
+        self.assertEqual([c.kwargs["label"] for c in menu.add_cascade.call_args_list], ["Font size", "Outline weight", "Theme"])
         menu.delete.assert_not_called()
         menu.entryconfigure.assert_not_called()
 
@@ -209,7 +254,7 @@ class AppearanceTests(unittest.TestCase):
             canvas.yview_moveto.assert_called_with(0.4)
             env['apply_appearance']({'font_size':48})
             place.assert_called_once()
-            canvas.yview_moveto.assert_called_with(0)
+            canvas.yview_moveto.assert_called_with(0.4)
 
     def test_fourteen_preset_and_live_persistence(self):
         with patch.object(appearance.tk, "Menu") as menu, patch.object(appearance.tk, "IntVar"), patch.object(appearance.tk, "StringVar"):

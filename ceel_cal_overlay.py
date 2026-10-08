@@ -70,6 +70,10 @@ OUTLINE_WEIGHT = 5  # Outline stroke thickness
 OUTLINE_COLOR = "#0F172A"  # Dark slate stroke border
 TEXT_COLOR = "#E2E8F0"  # Main soft slate text color
 
+EXPIRY_INTERVAL_MS = 15000  # Local-only expiry checks; no calendar downloads
+cached_ics_data = None
+calendar_error = None
+
 REFRESH_INTERVAL_MS = 300000  # Refresh calendar every 5 minutes (300,000 ms)
 # ==============================================================================
 
@@ -77,7 +81,8 @@ REFRESH_INTERVAL_MS = 300000  # Refresh calendar every 5 minutes (300,000 ms)
 def parse_ics_date(dt_str):
   """Parses iCal date strings into local datetime objects and formatted time strings."""
   dt_str = dt_str.strip()
-  val = dt_str.split(":")[-1].replace("Z", "")
+  val = dt_str.split(":", 1)[-1] if ":" in dt_str and not re.match(r"^\d{8}T", dt_str) else dt_str
+  val = val.removesuffix("Z")
 
   # All-day event (YYYYMMDD)
   if len(val) == 8 and val.isdigit():
@@ -88,14 +93,17 @@ def parse_ics_date(dt_str):
   if len(val) >= 15 and "T" in val:
     date_part, time_part = val.split("T")[:2]
     y, m, d = int(date_part[:4]), int(date_part[4:6]), int(date_part[6:8])
-    hh, mm = int(time_part[:2]), int(time_part[2:4])
-
-    is_utc = dt_str.endswith("Z") or "UTC" in dt_str
-    dt = datetime.datetime(y, m, d, hh, mm)
-
-    if is_utc:
-      # Convert UTC to local system time
-      dt = dt.replace(tzinfo=datetime.timezone.utc).astimezone()
+    hh, mm, ss = int(time_part[:2]), int(time_part[2:4]), int(time_part[4:6])
+    dt = datetime.datetime(y, m, d, hh, mm, ss)
+    if dt_str.endswith("Z") or "UTC" in dt_str:
+      dt = dt.replace(tzinfo=datetime.timezone.utc)
+    elif re.fullmatch(r"[+-]\d{2}:?\d{2}", time_part[6:]):
+      offset = time_part[6:].replace(":", "")
+      minutes = int(offset[1:3]) * 60 + int(offset[3:5])
+      dt = dt.replace(tzinfo=datetime.timezone(datetime.timedelta(
+          minutes=minutes if offset[0] == "+" else -minutes)))
+    # Floating/local values keep the existing system-local interpretation.
+    dt = dt.astimezone()
 
     event_date = dt.date()
     time_formatted = dt.strftime("%I:%M %p").lstrip("0")
@@ -105,29 +113,35 @@ def parse_ics_date(dt_str):
 
 
 def fetch_two_day_schedule(ical_url):
-  """Downloads iCal feed and extracts events for both Today and Tomorrow with static header."""
-  main_header_block = f"{HEADER_TITLE.upper()}\n" + ("═" * 26)
-
+  """Refresh the cached feed; never retain an already-formatted stale schedule."""
+  global cached_ics_data, calendar_error
   if CONFIG_ERROR:
-    return f"{main_header_block}\n\nCONFIG ERROR\n{CONFIG_ERROR}"
-
+    calendar_error = f"CONFIG ERROR\n{CONFIG_ERROR}"
+    return format_cached_schedule()
   try:
-    req = urllib.request.Request(
-        ical_url, headers={"User-Agent": "Mozilla/5.0"}
-    )
+    req = urllib.request.Request(ical_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=10) as response:
-      ics_data = response.read().decode("utf-8", errors="ignore")
-  except Exception as e:
-    return (
-        f"{main_header_block}\n\nCALENDAR UNAVAILABLE\nError loading feed:"
-        f" {type(e).__name__}"
-    )
+      cached_ics_data = response.read().decode("utf-8", errors="ignore")
+    calendar_error = None
+  except Exception as error:
+    calendar_error = f"CALENDAR UNAVAILABLE\nError loading feed: {type(error).__name__}"
+  return format_cached_schedule()
 
+
+def format_cached_schedule(now=None):
+  """Re-evaluate cached starts locally, including after failed network refreshes."""
+  now = (now or datetime.datetime.now().astimezone()).astimezone()
+  main_header_block = f"{HEADER_TITLE.upper()}\n" + ("═" * 26)
+  if calendar_error:
+    main_header_block += f"\n\n{calendar_error}"
+  if cached_ics_data is None:
+    return main_header_block
+  ics_data = cached_ics_data
   # Unfold multi-line iCal text wrapping
   ics_data = ics_data.replace("\r\n ", "").replace("\n ", "")
   vevents = re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", ics_data, re.DOTALL)
 
-  today = datetime.date.today()
+  today = now.date()
   tomorrow = today + datetime.timedelta(days=1)
 
   today_events = []
@@ -141,7 +155,12 @@ def fetch_two_day_schedule(ical_url):
       summary = summary_match.group(1).strip().replace("\\,", ",")
       dt_raw = dtstart_match.group(1).strip()
 
-      event_date, time_str, dt_obj = parse_ics_date(dt_raw)
+      try:
+        event_date, time_str, dt_obj = parse_ics_date(dt_raw)
+      except (ValueError, OverflowError):
+        continue
+      if dt_obj is not None and now >= dt_obj + datetime.timedelta(minutes=30):
+        continue
 
       if event_date == today:
         today_events.append((dt_obj, time_str, summary))
@@ -254,6 +273,7 @@ def redraw_calendar(full_text):
   if h <= 1:
     h = window_h
 
+  # The fixed 20px inset covers every allowed stroke (0–5px) without rewrap.
   cx = 20  # Left padding
   cy = 20  # Top padding
   wrap_pixel_width = max(1, w - 40)  # Constrains text wrapping inside overlay width
@@ -302,13 +322,14 @@ layout_in_progress = False
 
 
 def apply_appearance(settings, refresh=False):
-  global EVENT_FONT_SIZE, window_w, window_h, layout_in_progress
+  global EVENT_FONT_SIZE, OUTLINE_WEIGHT, window_w, window_h, layout_in_progress
   if layout_in_progress:
     return
   layout_in_progress = True
   try:
-    previous_scroll = canvas.yview()[0] if refresh else 0
+    previous_scroll = canvas.yview()[0]
     EVENT_FONT_SIZE = settings["font_size"]
+    OUTLINE_WEIGHT = settings.get("outline_weight", 5)
     zone = calendar_zone(root, POSITION)
     width, height, _ = calendar_layout(root, canvas, current_schedule_text,
         FONT_FAMILY, EVENT_FONT_SIZE, max(1, zone[2] - zone[0] - 40),
@@ -332,7 +353,7 @@ def scroll_calendar(event):
 canvas.bind("<MouseWheel>", scroll_calendar)
 canvas.bind("<Button-4>", lambda event: canvas.yview_scroll(-1, "units"))
 canvas.bind("<Button-5>", lambda event: canvas.yview_scroll(1, "units"))
-appearance = Appearance(root, update_menu, __file__, 20, apply_appearance)
+appearance = Appearance(root, update_menu, __file__, 20, apply_appearance, default_outline=5)
 EVENT_FONT_SIZE = appearance.settings["font_size"]
 
 
@@ -351,8 +372,18 @@ def update_calendar():
   root.after(REFRESH_INTERVAL_MS, update_calendar)
 
 
-# Initial render
+def expire_calendar():
+  global current_schedule_text
+  text = format_cached_schedule()
+  if text != current_schedule_text:
+    current_schedule_text = text
+    apply_appearance(appearance.settings, refresh=True)
+  root.after(EXPIRY_INTERVAL_MS, expire_calendar)
+
+
+# Initial render and independent local expiry timer.
 update_calendar()
+root.after(EXPIRY_INTERVAL_MS, expire_calendar)
 
 
 # Keep terminal responsive to Ctrl+C

@@ -59,6 +59,12 @@ package them in archives for publication.
 
 Right-click visible text to select **Font size** on any overlay. Choose a preset (including **14 pt**),
 **Custom…** (8–144 pt), or **Reset default** (clock/IP: 72 pt; calendars: 20 pt).
+All four overlays also offer **Outline weight → None (0 px), 1 px, 2 px,
+3 px, 4 px, 5 px**, plus **Reset default** (clock/IP: 3 px; calendars: 5 px).
+Old settings without an outline option retain those original weights. Padding
+reserves room for the maximum stroke, so changing weight does not resize or move
+the overlay, rewrap calendar text, or reset its scroll position. The 5-pixel cap
+keeps drawing work bounded; no-outline draws just the foreground text.
 The clock also offers **Theme → Default, Halloween, Fall, Winter**, using the
 original colors and optional fonts listed above. Missing fonts show a warning
 and use a system fallback; no fonts are downloaded.
@@ -86,7 +92,16 @@ third. Appearance changes need no restart.
    Keep both values as JSON strings.
 3. Restart the calendar scripts after changing config. They locate config
    relative to the script, independently of the working directory, and refresh
-   calendars every five minutes.
+   calendars every five minutes. Both calendars hide timed appointments at
+   **start time + 30 minutes** (not end time). A separate local check every
+   15 seconds expires cached appointments without fetching again, even when
+   a network refresh fails. All-day events remain for their relevant day;
+   future/tomorrow events stay visible. UTC and numeric-offset starts are compared
+   as timezone-aware instants; floating/local times retain system-local semantics.
+   As before, named non-UTC TZID values use system-local time (no bundled timezone
+   database or recurrence expansion). Local expiry also rolls the day headers at
+   midnight. Only changed text is redrawn; scroll and dragged placement are retained.
+   On a failed refresh, a warning appears above any remaining cached events.
 
 Missing or invalid configuration appears as `CONFIG ERROR` without displaying
 private values. Keep private config local and transfer it privately when

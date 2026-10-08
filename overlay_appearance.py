@@ -9,6 +9,22 @@ from tkinter import font as tkfont, messagebox, simpledialog
 
 MIN_FONT_SIZE = 8
 MAX_FONT_SIZE = 144
+MAX_OUTLINE_WEIGHT = 5
+
+
+def valid_outline(value):
+    return type(value) is int and 0 <= value <= MAX_OUTLINE_WEIGHT
+
+
+def outline_padding(horizontal, vertical):
+    """Reserve stroke space without changing the validated layout or anchor.
+
+    Existing single-line padding already exceeds twice the maximum radius.
+    Keeping this floor also prevents edge-clamping drift when cycling weights.
+    """
+    return max(horizontal, 2 * MAX_OUTLINE_WEIGHT + 4), max(vertical, 2 * MAX_OUTLINE_WEIGHT + 4)
+
+
 CLOCK_THEMES = {
     "Default": ("Nunito-Black.ttf", "Nunito Black", "#E2E8F0", "#0F172A"),
     "Halloween": ("Creepster-Regular.ttf", "Creepster", "#FF5500", "#0F172A"),
@@ -27,8 +43,8 @@ def settings_path(script_file):
     return base / "DesktopOverlays" / (Path(script_file).stem + ".json")
 
 
-def load_settings(path, default_size):
-    result = {"font_size": default_size, "theme": "Default"}
+def load_settings(path, default_size, default_outline=3):
+    result = {"font_size": default_size, "theme": "Default", "outline_weight": default_outline}
     try:
         with path.open("r", encoding="utf-8") as stream:
             text = stream.read(4097)
@@ -36,6 +52,8 @@ def load_settings(path, default_size):
             return result
         data = json.loads(text)
         if isinstance(data, dict):
+            if valid_outline(data.get("outline_weight")):
+                result["outline_weight"] = data["outline_weight"]
             if valid_size(data.get("font_size")):
                 result["font_size"] = data["font_size"]
             if isinstance(data.get("theme"), str) and data["theme"] in CLOCK_THEMES:
@@ -88,10 +106,10 @@ def local_clock_font(root, script_file, theme):
 
 
 class Appearance:
-    def __init__(self, root, menu, script_file, default_size, apply, clock=False):
+    def __init__(self, root, menu, script_file, default_size, apply, clock=False, default_outline=3):
         self.root, self.path, self.apply = root, settings_path(script_file), apply
         self.default_size, self.clock = default_size, clock
-        self.settings = load_settings(self.path, default_size)
+        self.settings = load_settings(self.path, default_size, default_outline)
         self.size_var = tk.IntVar(master=root, value=self.settings["font_size"])
         self.theme_var = tk.StringVar(master=root, value=self.settings["theme"])
         menu.add_separator()
@@ -103,6 +121,15 @@ class Appearance:
         sizes.add_command(label=f"Reset default ({default_size} pt)",
                           command=lambda: self.set_size(default_size))
         menu.add_cascade(label="Font size", menu=sizes)
+        self.outline_var = tk.IntVar(master=root, value=self.settings["outline_weight"])
+        outlines = tk.Menu(menu, tearoff=False)
+        for weight in range(MAX_OUTLINE_WEIGHT + 1):
+            label = "None (0 px)" if weight == 0 else f"{weight} px"
+            outlines.add_radiobutton(label=label, variable=self.outline_var, value=weight,
+                                     command=lambda value=weight: self.set_outline(value))
+        outlines.add_command(label=f"Reset default ({default_outline} px)",
+                             command=lambda: self.set_outline(default_outline))
+        menu.add_cascade(label="Outline weight", menu=outlines)
         if clock:
             themes = tk.Menu(menu, tearoff=False)
             for name in CLOCK_THEMES:
@@ -123,6 +150,12 @@ class Appearance:
         self.settings["font_size"] = size
         self.size_var.set(size)
         self.changed()
+
+    def set_outline(self, weight):
+        if valid_outline(weight):
+            self.settings["outline_weight"] = weight
+            self.outline_var.set(weight)
+            self.changed()
 
     def set_theme(self, theme):
         if self.clock and theme in CLOCK_THEMES:

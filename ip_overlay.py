@@ -2,7 +2,7 @@ import socket
 import sys
 import tkinter as tk
 from overlay_updater import attach_update_menu
-from overlay_appearance import Appearance, fit_single_line, place_within_screen
+from overlay_appearance import Appearance, fit_single_line, place_within_screen, outline_padding
 import tkinter.font as tkfont
 
 
@@ -143,9 +143,10 @@ def redraw_ip(ip_str):
 
 
 def apply_appearance(settings, initial=False):
-  global FONT_SIZE, window_w, window_h
+  global OUTLINE_WEIGHT, FONT_SIZE, window_w, window_h
+  OUTLINE_WEIGHT = settings.get("outline_weight", 3)
   FONT_SIZE, width, height = fit_single_line(root, FONT_FAMILY, settings["font_size"],
-      "255.255.255.255", (OUTLINE_WEIGHT * 4 + 40, OUTLINE_WEIGHT * 4 + 20), "bold")
+      "255.255.255.255", outline_padding(52, 32), "bold")
   position = None
   if initial:
     position = (root.winfo_screenwidth() - width - CORNER_MARGIN,

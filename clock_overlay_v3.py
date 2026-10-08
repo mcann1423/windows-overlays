@@ -14,7 +14,7 @@ FONT_FAMILY = "Arial Rounded MT Bold"
 TEXT_COLOR = "#E2E8F0"
 OUTLINE_COLOR = "#0F172A"
 from overlay_appearance import (Appearance, CLOCK_THEMES, local_clock_font,
-                                fit_single_line, place_within_screen, monitor_bounds, clock_position)
+                                fit_single_line, place_within_screen, monitor_bounds, clock_position, outline_padding)
 
 root = tk.Tk()
 update_menu = attach_update_menu(root, __file__)
@@ -139,7 +139,8 @@ clock_anchor = None
 
 
 def apply_appearance(settings, initial=False):
-  global FONT_SIZE, FONT_FAMILY, TEXT_COLOR, OUTLINE_COLOR, window_w, window_h, active_theme
+  global OUTLINE_WEIGHT, FONT_SIZE, FONT_FAMILY, TEXT_COLOR, OUTLINE_COLOR, window_w, window_h, active_theme
+  OUTLINE_WEIGHT = settings.get("outline_weight", 3)
   theme = settings["theme"]
   if theme != active_theme:
     FONT_FAMILY = local_clock_font(root, __file__, theme)
@@ -150,7 +151,7 @@ def apply_appearance(settings, initial=False):
              for minute in range(60) for period in ("AM", "PM")]
   widest = max(samples, key=font.measure)
   FONT_SIZE, width, height = fit_single_line(root, FONT_FAMILY, settings["font_size"],
-      widest, (OUTLINE_WEIGHT * 4 + 80, OUTLINE_WEIGHT * 4 + 40))
+      widest, outline_padding(92, 52))
   position = clock_position(monitor_bounds(root), width, height, clock_anchor)
   window_w, window_h = place_within_screen(root, width, height, position)
   redraw_clock(current_time_str or strftime("%I:%M %p").lstrip("0"))
