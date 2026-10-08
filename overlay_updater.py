@@ -40,7 +40,12 @@ API = "https://api.github.com/repos/" + REPOSITORY
 RAW = "https://raw.githubusercontent.com/" + REPOSITORY
 FILES = ("overlay_updater.py", "overlay_windows.py", "overlay_appearance.py", "clock_overlay_v3.py", "ip_overlay.py",
          "cchl_cal_overlay.py", "ceel_cal_overlay.py", "README.md",
-         "calendar_config.example.json")
+         "calendar_config.example.json", "overlay.bat")
+# Frozen predecessor, not derived from future expanded manifests.
+PRE_LAUNCHER_FILES = frozenset({"overlay_updater.py", "overlay_windows.py",
+    "overlay_appearance.py", "clock_overlay_v3.py", "ip_overlay.py",
+    "cchl_cal_overlay.py", "ceel_cal_overlay.py", "README.md",
+    "calendar_config.example.json"})
 STATE = ".overlay-update.json"
 LOCK = ".overlay-update.lock"
 BACKUPS = ".overlay-update-backups"
@@ -145,6 +150,9 @@ def validate_content(name, data):
                     any(not isinstance(v, str) or v != "YOUR_GOOGLE_CALENDAR_SECRET_ICAL_URL"
                         for v in example.values())):
                 raise ValueError()
+        elif name == "overlay.bat":
+            if not text.startswith("@echo off"):
+                raise ValueError()  # Validate only; never execute downloaded batch.
         elif not text.startswith("# Windows desktop overlays"):
             raise ValueError()
     except (ValueError, UnicodeError, SyntaxError, TypeError, AttributeError):
@@ -282,14 +290,24 @@ class FolderUpdater:
         if before[STATE] is not None:
             state = decode_json(before[STATE])
             if (not isinstance(state, dict) or state.get("version") != 1 or
-                    not isinstance(state.get("files"), dict) or set(state["files"]) != set(FILES) or
+                    not isinstance(state.get("files"), dict) or set(state["files"]) not in (set(FILES), PRE_LAUNCHER_FILES) or
                     not isinstance(state.get("commit"), str) or not SHA.fullmatch(state["commit"])):
                 raise UpdateError("Invalid installed baseline. Preserve it and reconcile manually; see README.")
-            for name in FILES:
+            for name in state["files"]:
                 if before[name] is None or digest(before[name]) != state["files"][name]:
                     raise UpdateError("Local edits or missing installed file: " + name +
                                       ". Back up and reconcile manually; nothing replaced.")
+        # Only the new launcher may be absent from the exact predecessor baseline.
+        # Untracked launchers require reconciliation; an identical fresh ZIP needs no replacement.
+        if (before["overlay.bat"] is not None and before[STATE] is not None
+                and "overlay.bat" not in state["files"]):
+            raise UpdateError("Untracked overlay.bat already exists. Back it up outside the installation, "
+                              "review it, then move it out before retrying; nothing replaced.")
         sha, incoming = self.fetch()
+        if (before[STATE] is None and before["overlay.bat"] is not None
+                and before["overlay.bat"] != incoming["overlay.bat"]):
+            raise UpdateError("Untracked overlay.bat differs from the publication. Back it up outside "
+                              "the installation, review it, then move it out before retrying; nothing replaced.")
         state_bytes = (json.dumps({"version": 1, "commit": sha,
                                   "files": {n: digest(incoming[n]) for n in FILES}},
                                  indent=2) + chr(10)).encode("utf-8")

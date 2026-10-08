@@ -37,7 +37,7 @@ REPARSE = 0x400
 DIRECTORY = 0x10
 MANAGED = frozenset({'overlay_updater.py', 'overlay_windows.py', 'overlay_appearance.py',
                      'clock_overlay_v3.py', 'ip_overlay.py', 'cchl_cal_overlay.py',
-                     'ceel_cal_overlay.py', 'readme.md', 'calendar_config.example.json',
+                     'ceel_cal_overlay.py', 'overlay.bat', 'readme.md', 'calendar_config.example.json',
                      '.overlay-update.json', '.overlay-update.lock', '.overlay-update-backups'})
 
 

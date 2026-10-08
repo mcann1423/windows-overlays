@@ -110,7 +110,7 @@ your account; on Linux/macOS use `chmod 600 calendar_config.json`.
 
 ## Publication boundaries
 
-Only the four scripts above, the shared updater and Windows trust helper, their tests, this README,
+Only the four scripts above, the shared helpers, overlay.bat, their tests, this README,
 `.gitignore`, and the placeholder-only example config are published. `calendar_config.json`, common config backups,
 legacy `clock_overlay.py` and `clock_overlay_v2.py`, and all fonts remain local
 and ignored. Never force-add them or put real feed URLs in the example or
@@ -135,16 +135,16 @@ at startup or on a timer. Downloads and file operations run in a worker; Tk
 handles dialogs on its main thread. Leave the initiating window open to see the
 result. Closing it does not cancel the non-daemon worker.
 
-The updater resolves public GitHub main once, then fetches a tree and nine
+The updater resolves public GitHub main once, then fetches a tree and ten
 allowlisted files pinned to that immutable commit SHA: itself, its Windows trust and appearance helpers, the four overlays,
-README (current setup/recovery guidance), and the placeholder-only config example
+the manual overlay.bat launcher, README (current setup/recovery guidance), and the placeholder-only config example
 (setup reference). It never downloads tests, .gitignore, fonts, real config,
 legacy clocks, unknown files or .git. There is no ZIP extraction, authentication,
 calendar access, or import/execution of fetched scripts. A protected installation
 may launch only the dedicated local updater child described below.
 
 Existing-solutions preflight: Git requires an unwanted end-user installation;
-third-party updater libraries add dependencies without benefit for nine flat
+third-party updater libraries add dependencies without benefit for ten flat
 files. Maintained standard-library urllib plus GitHub API/raw endpoints suffice.
 Downloads require trusted HTTPS hosts, reject redirects, use 15-second socket
 timeouts and a 45-second read budget per response (a blocking read may extend
@@ -195,14 +195,73 @@ certificates, not user CA files/stores. Networks requiring a proxy or only a
 per-user enterprise CA must use manual deployment. No ACL is loosened, no service
 is installed, and no Git/authentication or pip is needed on the target computer.
 
+### Normal launcher and nine-file updater migration
+
+The published **overlay.bat** lives beside the scripts, normally in
+**C:\Program Files\Clock Overlay** (singular). It uses its own directory,
+not a hard-coded app path, and defaults to **C:\Program Files\Python314\pythonw.exe**.
+Run it normally, **never as administrator**; it refuses an elevated token.
+It verifies the interpreter and all four scripts before stopping anything,
+sets the application working directory, stops only exact interpreter + quoted
+full-script command lines for the four published overlays, waits for their exit,
+then starts each once. Other pythonw programs and the updater child are not killed.
+Custom launchers using relative/unquoted script arguments, extra flags or another
+Python installation are deliberately not matched: close those overlays manually
+first to avoid duplicates. Process-query/access/stop failures abort the restart.
+A start failure attempts to stop only the replacements already started; review
+any error before retrying. This is a restart helper, not a GUI health check.
+
+**Never launch/restart while any update check, confirmation, download, UAC prompt
+or updater child is pending—even before a lock exists.** Wait for the final
+success result, dismiss it, and confirm the child has exited. A lock blocks the
+launcher but does not cover the pre-lock UAC window or prevent a concurrently
+initiated update. On failure/interruption follow recovery below, not a restart.
+
+For the immediately previous **nine-file updater** with a matching, unedited
+baseline (or no baseline):
+
+1. Run **Check for updates…** once. Wait for success and updater exit. This old
+   running updater installs the new Python helpers but does **not** fetch overlay.bat.
+2. Close **all four** overlays and relaunch normally with your existing launcher
+   (or launch the four scripts manually). This loads the new updater into memory.
+3. Run **Check for updates…** again; wait for success and updater exit. This fetches
+   overlay.bat and expands the baseline to ten files. Then use overlay.bat normally
+   for subsequent restarts.
+
+Only that exact nine-file baseline can expand automatically, and all nine old
+file hashes must still match. Missing/edited old files and unknown baseline entries
+still block. The absent launcher is allowed through protected trust validation
+before download; any existing launcher is ACL-checked. If an **untracked local
+overlay.bat already exists**, the new updater refuses to overwrite it (even first
+use if its bytes differ from the published batch; an identical fresh ZIP copy is adopted
+without replacement): back it up **outside** the installation, review its custom behavior, and move
+it out before retrying. Once tracked, launcher edits/missing files block as usual.
+Do not delete the baseline merely to bypass an edit warning.
+
+Manual alternative: after all updates/children finish, close the overlays, back up
+existing managed files/metadata outside the installation, inspect the public ZIP,
+and copy the ten managed files with Explorer (administrator copy approval only).
+Explicitly reconcile/back up a colliding launcher first. Preserve private config,
+fonts, appearance settings, legacy scripts and other files. Preserve then move the
+old baseline out after manual replacement; the next confirmed update records a
+fresh baseline. Never remove an active lock. Older seven/eight-file updaters need
+this manual bootstrap rather than the two-run path.
+
+Optionally create a **Startup shortcut** targeting
+**"C:\Program Files\Clock Overlay\overlay.bat"**, with **Start in**
+**C:\Program Files\Clock Overlay**, and **Run as administrator unchecked**.
+Do not copy the batch itself to Startup (its directory is the app directory).
+Avoid duplicate Startup entries. No existing external Startup file is changed by
+this repository or updater. The updater only downloads the batch; it never runs it.
+
 ### One-time bootstrap for an older updater
 
 The older updater cannot request UAC, and its seven-file manifest cannot install
 the new helpers. Close all overlays. Download the public repository ZIP, inspect
 it, and back up existing application files and updater metadata. Use **Explorer**
-to copy the nine managed files into `C:\Program Files\Clock Overlay`, accepting
+to copy the ten managed files into `C:\Program Files\Clock Overlay`, accepting
 Explorer's administrator approval for the copy. These are both updater modules, the appearance helper,
-the four current overlays, README, and `calendar_config.example.json`. Preserve
+the four current overlays, overlay.bat, README, and `calendar_config.example.json`. Preserve
 `calendar_config.json` (the exact private configuration filename), all fonts,
 legacy clocks and other local files. Do not copy the example over private config.
 
@@ -253,11 +312,11 @@ Use a folder you control.
 
 Existing Git clients may run **git pull --ff-only origin main** once to obtain
 this updater. Stop and preserve local changes if Git refuses. Alternatively,
-download the ZIP and manually copy the nine managed files after backing up
+download the ZIP and manually copy the ten managed files after backing up
 local edits; leave real config/fonts/legacy/unknown files untouched. Restart all
 overlays. Subsequent menu updates need no Git and leave Git HEAD/index alone:
 a clone may show tracked changes afterward. Do not blindly pull/reset it.
-If copying only the nine files into an old clone, manually merge the four
+If copying only the ten files into an old clone, manually merge the four
 updater ignore patterns from the new .gitignore before publishing anything;
 the downloader intentionally never edits .gitignore.
 
@@ -300,7 +359,7 @@ Manual replacement deliberately breaks an existing installed-hash baseline.
 After preserving/reviewing any local code edits, and only after confirming there
 is no unfinished transaction, move the old .overlay-update.json outside the
 installation (keep the backup). The next confirmed menu update is a first-use
-update: it may replace all nine managed files and records a fresh baseline.
+update: it may replace all ten managed files and records a fresh baseline.
 Restart overlays normally, not elevated, and retry the update. Much older
 seven-file installs still need the full bootstrap described above.
 
@@ -362,3 +421,8 @@ replaced code. Existing updater baselines may report local edits after manual
 replacement; do not delete locks/backups or force through failed transactions.
 Run the diagnostic, then restart overlays normally, not as administrator. No
 Windows reboot or Python reinstall is required merely to deploy this fix.
+
+Launcher validation: offline tests cover batch envelope/preflight ordering, exact
+process-pattern selection with mocks, real predecessor-to-current updater migration,
+collisions and protected ACL checks. Native Windows cmd/PowerShell, UAC and GUI
+restart behavior still require testing on the target Windows installation.

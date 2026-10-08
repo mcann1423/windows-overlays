@@ -29,6 +29,7 @@ class FolderTests(unittest.TestCase):
         self.files['calendar_config.example.json'] = encoded({
             'cchl_ical_url': 'YOUR_GOOGLE_CALENDAR_SECRET_ICAL_URL',
             'ceel_ical_url': 'YOUR_GOOGLE_CALENDAR_SECRET_ICAL_URL'})
+        self.files['overlay.bat'] = b'@echo off'+bytes([10])
         self.urls = []
         self.mock = patch.object(updater, 'download', side_effect=self.http).start()
         self.addCleanup(patch.stopall)
