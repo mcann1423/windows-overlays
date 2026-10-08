@@ -39,9 +39,27 @@ MANAGED = frozenset({'overlay_updater.py', 'overlay_windows.py', 'overlay_appear
                      '.overlay-update.json', '.overlay-update.lock', '.overlay-update-backups'})
 
 
+def _trustee_label(sid):
+    # Never resolve account names or disclose machine/domain/account identifiers.
+    # Well-known SIDs are public constants; all other SIDs stay categorized.
+    known = {
+        "S-1-1-0": "Everyone", "S-1-5-11": "Authenticated Users",
+        "S-1-5-32-545": "BUILTIN Users", "S-1-3-0": "CREATOR OWNER",
+        "S-1-3-1": "CREATOR GROUP", "S-1-3-4": "OWNER RIGHTS",
+        "S-1-5-18": "SYSTEM", "S-1-5-32-544": "Administrators",
+    }
+    if sid in known:
+        return known[sid] + " [" + sid + "]"
+    if sid in TRUSTED:
+        return "TrustedInstaller"
+    if isinstance(sid, str) and sid.startswith("S-1-5-21-"):
+        return "account/domain SID (redacted)"
+    return "other SID (redacted)"
+
+
 def _acl_policy(owner, aces, directory, inheritance=False, ancestor=False):
     if owner not in TRUSTED:
-        raise SecurityError("Installation object has an untrusted owner.")
+        raise SecurityError("Installation object has an untrusted owner (%s)." % _trustee_label(owner))
     if aces is None:
         raise SecurityError("Installation object has a missing or NULL DACL.")
     inherited_admin = False
@@ -56,7 +74,12 @@ def _acl_policy(owner, aces, directory, inheritance=False, ancestor=False):
         allowed = READ_ONLY | (0x4 if ancestor else 0)
         effective = not flags & 8  # INHERIT_ONLY does not apply to this object.
         if kind == 0 and sid not in TRUSTED and mask & ~allowed and (effective or not ancestor):
-            raise SecurityError("Installation ACL grants untrusted write rights (ACE %d, mask 0x%08X, flags 0x%02X)." % (index, mask, flags))
+            raise SecurityError(
+                "Installation ACL grants untrusted write rights "
+                "(ACE %d, mask 0x%08X, flags 0x%02X; trustee %s; %s; %s)." %
+                (index, mask, flags, _trustee_label(sid),
+                 "applies to object" if effective else "inherit-only",
+                 "ancestor directory" if ancestor else "directory" if directory else "file"))
         # Require an ordinary inheritable full-control grant to a trusted
         # principal. CREATOR OWNER is intentionally not accepted.
         if (kind == 0 and sid in TRUSTED and flags & 3 == 3
@@ -252,7 +275,9 @@ class ProtectedInstall:
             return "Python tree entry"
         if _under(path, self.install):
             return "managed application entry"
-        return "installation ancestor (depth %d)" % len(path[3:].split(chr(92)))
+        # Depth counts components below the drive root, not distance from install.
+        depth = len(path[3:].split(chr(92))) if path[3:] else 0
+        return "installation ancestor (depth %d)" % depth
 
     def _guard(self, path, directory, writable=False, ancestor=False):
         try:

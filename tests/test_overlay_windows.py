@@ -73,6 +73,38 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(sec.SecurityError):
             sec._acl_policy(ADMIN, SAFE + [(0, 0, 4, USER)], True, True)
 
+    def test_full_control_is_not_a_trustee_identity(self):
+        sec._acl_policy(ADMIN, [(0, 3, 0x1F01FF, ADMIN)], True, ancestor=True)
+        for sid, label in [('S-1-1-0', 'Everyone'),
+                           ('S-1-5-11', 'Authenticated Users'),
+                           ('S-1-3-0', 'CREATOR OWNER'),
+                           ('S-1-3-4', 'OWNER RIGHTS'),
+                           (USER, 'account/domain SID')]:
+            with self.subTest(sid=sid), self.assertRaises(sec.SecurityError) as error:
+                sec._acl_policy(ADMIN, SAFE + [(0, 3, 0x1F01FF, sid)], True, ancestor=True)
+            self.assertIn(label, str(error.exception))
+            self.assertIn('applies to object; ancestor directory', str(error.exception))
+            self.assertNotIn(USER, str(error.exception))
+
+    def test_default_style_ancestor_inheritance_not_blanket_trust(self):
+        # Representative pattern, not a claim about every Windows installation:
+        # Users can create subdirectories; creator full control is inherit-only.
+        aces = SAFE + [(0, 2, 4, 'S-1-5-32-545'), (0, 11, 0x1F01FF, 'S-1-3-0')]
+        sec._acl_policy(ADMIN, aces, True, ancestor=True)
+        # Its actual protected descendants must still pass their own policy.
+        for flags in (3, 19):
+            with self.assertRaises(sec.SecurityError):
+                sec._acl_policy(ADMIN, SAFE + [(0, flags, 0x1F01FF, USER)], True)
+        for mask in (0x40, 0x10000, 0x40000, 0x80000, 0x1F01FF):
+            with self.assertRaises(sec.SecurityError):
+                sec._acl_policy(ADMIN, aces + [(0, 3, mask, USER)], True, ancestor=True)
+
+    def test_trustee_diagnostics_are_bounded_and_sanitized(self):
+        for sid in [USER, 'S-1-5-80-123456789', 'malicious\nprivate-path']:
+            self.assertNotIn(sid, sec._trustee_label(sid))
+        with self.assertRaisesRegex(sec.SecurityError, 'untrusted owner.*redacted'):
+            sec._acl_policy(USER, SAFE, True)
+
     def test_paths(self):
         for path in ['relative/x', 'C:x', '//server/x', '//?/C:/x',
                 'C:/x:ads', 'C:/x/../y', 'C:/x.', 'C:/x ', 'C:/PROGRA~1/x',
@@ -187,6 +219,26 @@ class ContextTests(unittest.TestCase):
                 pass
         self.assertNotIn(USER,str(error.exception))
         self.assertNotIn('os.py',str(error.exception))
+        self.assertFalse(self.api.handles)
+
+    def test_ancestor_depth_is_from_drive_root(self):
+        guard = self.context()
+        self.assertEqual(guard._label(p('C:/')), 'installation ancestor (depth 0)')
+        self.assertEqual(guard._label(p('C:/Program Files')), 'installation ancestor (depth 1)')
+        self.assertEqual(guard._label(p('C:/Program Files/Python Software Foundation')),
+                         'installation ancestor (depth 2)')
+        self.assertEqual(guard._label(p('C:/Overlays')), 'application directory')
+        guard.local_details = True
+        self.assertEqual(guard._label(p('C:/Program Files')), p('C:/Program Files'))
+
+    def test_ancestor_namespace_replacement_is_rejected(self):
+        with self.context() as guard:
+            root = p('C:/')
+            old = self.api.nodes[root]
+            # Even a replacement with equally safe ACLs must not change identity.
+            self.api.nodes[root] = [999, *old[1:]]
+            with self.assertRaisesRegex(sec.SecurityError, 'pathname identity changed'):
+                guard.revalidate()
         self.assertFalse(self.api.handles)
 
     def test_inactive(self):
