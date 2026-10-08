@@ -7,6 +7,7 @@ import re
 import sys
 import tkinter as tk
 from overlay_updater import attach_update_menu
+from overlay_appearance import Appearance, calendar_layout, place_within_screen
 import tkinter.font as tkfont
 import urllib.request
 
@@ -254,7 +255,7 @@ def redraw_calendar(full_text):
 
   cx = 20  # Left padding
   cy = 20  # Top padding
-  wrap_pixel_width = w - 40  # Constrains text wrapping inside overlay width
+  wrap_pixel_width = max(1, w - 40)  # Constrains text wrapping inside overlay width
 
   r = OUTLINE_WEIGHT
   if r > 0:
@@ -310,13 +311,47 @@ else:  # Defaults to "right"
 pos_x = zone_start_x + (zone_width - window_w) // 2  # Center inside target zone
 pos_y = (screen_h - window_h) // 2  # Vertically centered
 
-root.geometry(f"{window_w}x{window_h}+{pos_x}+{pos_y}")
-root.update()
+default_window_w, default_window_h = window_w, window_h
+window_w, window_h = place_within_screen(root, window_w, window_h, (pos_x, pos_y))
+current_schedule_text = ""
+
+
+def apply_appearance(settings, refresh=False):
+  global EVENT_FONT_SIZE, window_w, window_h
+  previous_scroll = canvas.yview()[0] if refresh else 0
+  EVENT_FONT_SIZE = settings["font_size"]
+  if EVENT_FONT_SIZE == 20:
+    # Reset restores the original three-zone dimensions.
+    width, height = default_window_w, default_window_h
+  else:
+    width, height, _ = calendar_layout(root, canvas, current_schedule_text,
+        FONT_FAMILY, EVENT_FONT_SIZE, default_window_w, default_window_h)
+  if not refresh:
+    window_w, window_h = place_within_screen(root, width, height)
+  canvas.yview_moveto(0)
+  redraw_calendar(current_schedule_text)
+  bounds = canvas.bbox("all")
+  canvas.configure(scrollregion=(0, 0, window_w,
+      max(window_h, bounds[3] + 20 if bounds else 0)))
+  canvas.yview_moveto(previous_scroll)
+
+
+def scroll_calendar(event):
+  if event.delta:
+    canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+
+canvas.bind("<MouseWheel>", scroll_calendar)
+canvas.bind("<Button-4>", lambda event: canvas.yview_scroll(-1, "units"))
+canvas.bind("<Button-5>", lambda event: canvas.yview_scroll(1, "units"))
+appearance = Appearance(root, update_menu, __file__, 20, apply_appearance)
+EVENT_FONT_SIZE = appearance.settings["font_size"]
 
 
 def update_calendar():
-  full_schedule_text = fetch_two_day_schedule(ICAL_URL)
-  redraw_calendar(full_schedule_text)
+  global current_schedule_text
+  current_schedule_text = fetch_two_day_schedule(ICAL_URL)
+  apply_appearance(appearance.settings, refresh=bool(canvas.find_all()))
   root.after(REFRESH_INTERVAL_MS, update_calendar)
 
 

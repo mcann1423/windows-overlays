@@ -7,55 +7,14 @@ import tkinter.font as tkfont
 from time import strftime
 
 
-def resolve_font(
-    font_path, font_name, fallback_font="Arial Rounded MT Bold"
-):
-  """Registers custom font file if present; falls back to built-in Windows rounded font if missing."""
-  if os.path.exists(font_path):
-    ctypes.windll.gdi32.AddFontResourceExW(
-        os.path.abspath(font_path), 0x10, 0
-    )
-    return font_name
-  return fallback_font
-
-
-# Font & Styling Configuration
-
-# DEFAULT THEME
-FONT_FILE = "Nunito-Black.ttf"
-TARGET_FONT = "Nunito Black"
-TEXT_COLOR = "#E2E8F0"
+# Original Default theme and size.
 FONT_SIZE = 72
 OUTLINE_WEIGHT = 3
-OUTLINE_COLOR = "#0F172A"  # Dark slate stroke border
-
-# HALLOWEEN THEME
-#FONT_FILE = "Creepster-Regular.ttf"
-#TARGET_FONT = "Creepster"
-#TEXT_COLOR = "#FF5500"
-#FONT_SIZE = 72
-#OUTLINE_WEIGHT = 3
-#OUTLINE_COLOR = "#0F172A"  # Dark slate stroke border
-
-# FALL THEME
-#FONT_FILE = "BerkshireSwash-Regular.ttf"
-#TARGET_FONT = "Berkshire Swash"
-#TEXT_COLOR = "#D97706"
-#FONT_SIZE = 72
-#OUTLINE_WEIGHT = 3
-#OUTLINE_COLOR = "#0F172A"  # Dark slate stroke border
-
-# WINTER THEME
-#FONT_FILE = "MountainsofChristmas-Bold.ttf"
-#TARGET_FONT = "Mountains of Christmas"
-#TEXT_COLOR = "#E0F2FE"
-#FONT_SIZE = 72
-#OUTLINE_WEIGHT = 3
-#OUTLINE_COLOR = "#38BDF8"  # Dark slate stroke border
-
-
-
-FONT_FAMILY = resolve_font(FONT_FILE, TARGET_FONT, "Arial Rounded MT Bold")
+FONT_FAMILY = "Arial Rounded MT Bold"
+TEXT_COLOR = "#E2E8F0"
+OUTLINE_COLOR = "#0F172A"
+from overlay_appearance import (Appearance, CLOCK_THEMES, local_clock_font,
+                                fit_single_line, place_within_screen)
 
 root = tk.Tk()
 update_menu = attach_update_menu(root, __file__)
@@ -173,24 +132,32 @@ def redraw_clock(time_str):
   )
 
 
-# Calculate geometry using font metrics
-measure_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE)
-estimated_text = "12:59 PM"
-window_w = measure_font.measure(estimated_text) + (OUTLINE_WEIGHT * 4) + 80
-window_h = measure_font.metrics("linespace") + (OUTLINE_WEIGHT * 4) + 40
+active_theme = None
 
-screen_w = root.winfo_screenwidth()
-screen_h = root.winfo_screenheight()
 
-top_third_height = screen_h // 3
-center_x = (screen_w - window_w) // 2
-center_y = max(0, (top_third_height - window_h) // 2)
+def apply_appearance(settings, initial=False):
+  global FONT_SIZE, FONT_FAMILY, TEXT_COLOR, OUTLINE_COLOR, window_w, window_h, active_theme
+  theme = settings["theme"]
+  if theme != active_theme:
+    FONT_FAMILY = local_clock_font(root, __file__, theme)
+    active_theme = theme
+  _, _, TEXT_COLOR, OUTLINE_COLOR = CLOCK_THEMES[theme]
+  font = tkfont.Font(root=root, family=FONT_FAMILY, size=settings["font_size"])
+  samples = [f"{hour}:{minute:02d} {period}" for hour in range(1, 13)
+             for minute in range(60) for period in ("AM", "PM")]
+  widest = max(samples, key=font.measure)
+  FONT_SIZE, width, height = fit_single_line(root, FONT_FAMILY, settings["font_size"],
+      widest, (OUTLINE_WEIGHT * 4 + 80, OUTLINE_WEIGHT * 4 + 40))
+  position = None
+  if initial:
+    position = ((root.winfo_screenwidth() - width) // 2,
+                max(0, (root.winfo_screenheight() // 3 - height) // 2))
+  window_w, window_h = place_within_screen(root, width, height, position)
+  redraw_clock(current_time_str or strftime("%I:%M %p").lstrip("0"))
 
-# Position and size window
-root.geometry(f"{window_w}x{window_h}+{center_x}+{center_y}")
 
-# Force window layout update BEFORE executing the first canvas render pass
-root.update()
+appearance = Appearance(root, update_menu, __file__, 72, apply_appearance, clock=True)
+apply_appearance(appearance.settings, initial=True)
 
 
 def update_time():

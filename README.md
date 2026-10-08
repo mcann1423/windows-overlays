@@ -13,8 +13,8 @@ Drag an overlay to move it; hover to reveal its close button.
 
 Use Python 3 on Windows with Tcl/Tk and Tkinter installed (normally included
 with the standard Windows Python installer). All imports are from the Python
-standard library; no third-party Python packages are required. Keep the shared
-`overlay_updater.py` module beside all four scripts. Optional in-app updates use public HTTPS downloads: no Git, gh, pip packages, or authentication is required. Windows transparent-window attributes and the clock's Windows GDI
+standard library; no third-party Python packages are required. Keep the shared modules,
+`overlay_updater.py`, `overlay_windows.py` and `overlay_appearance.py`, beside all four scripts. Optional in-app updates use public HTTPS downloads: no Git, gh, pip packages, or authentication is required. Windows transparent-window attributes and the clock's Windows GDI
 font registration mean these scripts are not intended to run unchanged on Linux.
 Calendar overlays need network access to their configured feeds. The IP overlay
 uses a UDP socket route lookup against 8.8.8.8:80 to select the local interface;
@@ -32,20 +32,18 @@ py ceel_cal_overlay.py
 ```
 
 Each command runs an independent application; use separate terminals or
-shortcuts to run several together. For shortcuts, set **Start in** to this
-folder: the clock resolves its font file from the **current working directory**,
-not from the script's location.
+shortcuts to run several together. The clock resolves optional fonts beside its script, independently of the
+shortcut working directory. Existing Startup launchers need no changes.
 
 ## Fonts: supplied separately, never included in GitHub
 
 No font files are distributed in this repository. Obtain desired fonts
 separately under their applicable licenses and keep them local. The clock's
-active default expects `Nunito-Black.ttf` in its working directory and uses
+active default expects `Nunito-Black.ttf` beside the script and uses
 the family name `Nunito Black`. It registers that file privately with Windows
 GDI when present; when the file is missing, it requests `Arial Rounded MT Bold`.
 
-The existing commented seasonal configurations reference optional local files
-(not active by default):
+The clock Theme submenu references optional local files:
 
 - `Creepster-Regular.ttf` — `Creepster` (Halloween).
 - `BerkshireSwash-Regular.ttf` — `Berkshire Swash` (fall).
@@ -56,6 +54,23 @@ buttons request `Segoe UI`. Make those system fonts available separately for
 the intended appearance; Tk may substitute fonts if a family is unavailable.
 Font files and font directories are ignored by Git. Do not force-add fonts or
 package them in archives for publication.
+
+## Appearance controls
+
+Right-click visible text to select **Font size** on any overlay. Choose a preset,
+**Custom…** (8–144 pt), or **Reset default** (clock/IP: 72 pt; calendars: 20 pt).
+The clock also offers **Theme → Default, Halloween, Fall, Winter**, using the
+original colors and optional fonts listed above. Missing fonts show a warning
+and use a system fallback; no fonts are downloaded.
+
+Changes apply immediately and persist separately for each overlay in
+`%LOCALAPPDATA%\DesktopOverlays\<script-name>.json`. These per-user settings
+need no administrator approval and never modify `calendar_config.json` or the
+Program Files installation. Malformed settings fall back to defaults. Multiple
+instances of the same overlay use last-save-wins; different overlays have separate
+files. Windows are resized/repositioned within the current Windows monitor; clock/IP text
+may render smaller to fit a small screen. Large calendar content can be scrolled
+with the mouse wheel. Dragging, hover-close and **Check for updates…** remain.
 
 ## Local calendar configuration
 
@@ -76,7 +91,7 @@ your account; on Linux/macOS use `chmod 600 calendar_config.json`.
 
 ## Publication boundaries
 
-Only the four scripts above, the shared updater, its tests, this README,
+Only the four scripts above, the shared updater and Windows trust helper, their tests, this README,
 `.gitignore`, and the placeholder-only example config are published. `calendar_config.json`, common config backups,
 legacy `clock_overlay.py` and `clock_overlay_v2.py`, and all fonts remain local
 and ignored. Never force-add them or put real feed URLs in the example or
@@ -101,15 +116,16 @@ at startup or on a timer. Downloads and file operations run in a worker; Tk
 handles dialogs on its main thread. Leave the initiating window open to see the
 result. Closing it does not cancel the non-daemon worker.
 
-The updater resolves public GitHub main once, then fetches a tree and seven
-allowlisted files pinned to that immutable commit SHA: itself, the four overlays,
+The updater resolves public GitHub main once, then fetches a tree and nine
+allowlisted files pinned to that immutable commit SHA: itself, its Windows trust and appearance helpers, the four overlays,
 README (current setup/recovery guidance), and the placeholder-only config example
 (setup reference). It never downloads tests, .gitignore, fonts, real config,
 legacy clocks, unknown files or .git. There is no ZIP extraction, authentication,
-subprocess, calendar access, or import/execution of fetched scripts.
+calendar access, or import/execution of fetched scripts. A protected installation
+may launch only the dedicated local updater child described below.
 
 Existing-solutions preflight: Git requires an unwanted end-user installation;
-third-party updater libraries add dependencies without benefit for seven flat
+third-party updater libraries add dependencies without benefit for nine flat
 files. Maintained standard-library urllib plus GitHub API/raw endpoints suffice.
 Downloads require trusted HTTPS hosts, reject redirects, use 15-second socket
 timeouts and a 45-second read budget per response (a blocking read may extend
@@ -118,6 +134,65 @@ against GitHub blob hashes, sizes, UTF-8 and expected syntax/content. These are
 consistency checks trusting HTTPS and the publisher, not independent signed
 release authenticity. Offline/404/rate-limit errors leave application files
 unchanged; wait and retry for rate limits, without signing in.
+
+### Program Files and administrator approval
+
+For an existing installation at **C:\Program Files\Clock Overlays**, keep the
+actual Python scripts and both updater modules there. The Startup folder should
+contain only your existing launcher/shortcut: **do not change it or run overlays
+as administrator**. Use a standard, all-users CPython installation, not a per-user
+Python, virtual environment, Store alias, or portable/custom runtime. Protected
+updates support standard release CPython **3.11–3.14** on local fixed NTFS.
+
+After your menu confirmation, a worker tests folder write access **before** any
+update transaction. A writable installation updates normally. Only access
+denial triggers Windows' UAC prompt, via ShellExecuteExW `runas`, for the updater
+child alone. Approve your trusted Python executable to proceed, or cancel; no
+automatic retry occurs. The overlay GUI stays responsive and unprivileged.
+Already-administrator overlays are refused; close and relaunch normally.
+A failed transaction or rollback never triggers elevation.
+
+The child uses absolute paths and isolated Python startup (`-I -S -B`), accepts
+no target folder or arbitrary command, and updates only its own folder. The
+parent waits for the child process exit code; there are no shared request/result
+files. The child displays detailed errors, and the original overlay reports
+completion. Keep it open and restart **all** overlays manually only on success.
+
+Protected updates fail closed when local security checks cannot establish a
+trusted installation. The folder name `Program Files` alone is not proof of
+security. Owner/DACL checks allow only SYSTEM, Administrators and TrustedInstaller
+mutation of managed files, Python runtime files and protected folders. Ancestors
+are checked too; retained handles prevent rename/reparse substitution, and
+identities/ACLs are revalidated before writes. Links, junctions, unsupported ACLs,
+custom startup markers, redirected Python paths and untrusted writable runtime
+content are refused. This may reject customized installations; do not weaken
+permissions to make it pass. It scans the Python tree, which can take time.
+Trusted Windows, its loader/system DLLs and administrators are the platform trust
+boundary; this is not protection against an already-privileged attacker.
+
+The child strips OpenSSL/TLS/proxy environment overrides before network imports,
+restricts subsequent DLL search, disables proxies, and uses only machine ROOT
+certificates, not user CA files/stores. Networks requiring a proxy or only a
+per-user enterprise CA must use manual deployment. No ACL is loosened, no service
+is installed, and no Git/authentication or pip is needed on the target computer.
+
+### One-time bootstrap for an older updater
+
+The older updater cannot request UAC, and its seven-file manifest cannot install
+the new helpers. Close all overlays. Download the public repository ZIP, inspect
+it, and back up existing application files and updater metadata. Use **Explorer**
+to copy the nine managed files into `C:\Program Files\Clock Overlays`, accepting
+Explorer's administrator approval for the copy. These are both updater modules, the appearance helper,
+the four current overlays, README, and `calendar_config.example.json`. Preserve
+`calendar_config.json` (the exact private configuration filename), all fonts,
+legacy clocks and other local files. Do not copy the example over private config.
+
+After manually replacing managed files, preserve then move the old
+`.overlay-update.json` baseline out of the installation; the next confirmed
+update records a fresh baseline. Do not remove a live/stale lock without following
+the recovery steps below. Restart overlays normally using the existing Startup
+launcher. Future updates use the menu and UAC. Never bootstrap by running an
+entire overlay as administrator.
 
 ### Local edits, backups and recovery
 
@@ -159,18 +234,22 @@ Use a folder you control.
 
 Existing Git clients may run **git pull --ff-only origin main** once to obtain
 this updater. Stop and preserve local changes if Git refuses. Alternatively,
-download the ZIP and manually copy the seven managed files after backing up
+download the ZIP and manually copy the nine managed files after backing up
 local edits; leave real config/fonts/legacy/unknown files untouched. Restart all
 overlays. Subsequent menu updates need no Git and leave Git HEAD/index alone:
 a clone may show tracked changes afterward. Do not blindly pull/reset it.
-If copying only the seven files into an old clone, manually merge the four
+If copying only the nine files into an old clone, manually merge the four
 updater ignore patterns from the new .gitignore before publishing anything;
 the downloader intentionally never edits .gitignore.
 
 ### Tests and limitations
 
 Run **py -m unittest discover -s tests -v**. Tests use temporary ordinary folders,
-mocked HTTP and mocked Tk, not installed Git or real calendars. Linux tests and
+mocked HTTP, Windows APIs and mocked Tk, not installed Git or real calendars.
+**Native Windows/UAC execution has not been tested in this development environment.**
+Before deployment, verify approval/cancellation, all-users python/pythonw,
+alternate-admin credentials, real inherited ACLs, stage cleanup, rollback and
+concurrent updaters on a Windows test installation. Linux tests and
 static compilation do not replace a native Windows GUI smoke test of menu
 placement, transparency, antivirus/file-sharing behavior and multiple overlays.
 Python syntax validation uses installed Python; future code requiring a newer

@@ -63,6 +63,32 @@ class FolderTests(unittest.TestCase):
         self.assertEqual((self.root / 'overlay_updater.py').read_bytes(), b'x = 2\n')
         self.assertEqual(json.loads((self.root / updater.STATE).read_text())['commit'], self.sha)
 
+    def test_guarded_transaction_and_stage_release(self):
+        guard = Mock()
+        engine = updater.FolderUpdater(self.root, guard=guard)
+        engine.update()
+        names = [call.args[0].name for call in guard.check_path.call_args_list]
+        self.assertIn(updater.LOCK, names)
+        self.assertIn('recovery.json', names)
+        self.assertIn(updater.STATE, names)
+        guard.release_temporary.assert_called_once()
+        self.assertFalse(guard.release_temporary.call_args.args[0].exists())
+
+    def test_guard_denial_prevents_download(self):
+        guard = Mock()
+        guard.check_path.side_effect = RuntimeError('ACL changed')
+        with self.assertRaisesRegex(updater.UpdateError, 'trust changed'):
+            updater.FolderUpdater(self.root, guard=guard).update()
+        self.mock.assert_not_called()
+
+    def test_old_manifest_requires_manual_bootstrap(self):
+        self.engine.update()
+        state = json.loads((self.root / updater.STATE).read_text())
+        del state['files']['overlay_windows.py']
+        (self.root / updater.STATE).write_bytes(encoded(state))
+        with self.assertRaisesRegex(updater.UpdateError, 'baseline'):
+            self.engine.update()
+
     def test_preserve_unmanaged(self):
         names = ['calendar_config.json', 'Nunito.ttf', 'clock_overlay.py',
                  'clock_overlay_v2.py', 'unknown.txt', '.git/index', 'fonts/custom.otf']

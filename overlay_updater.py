@@ -1,4 +1,22 @@
-"""Manual public HTTPS updates; no Git, credentials, packages or script execution."""
+"""Manual public HTTPS updates; no Git, credentials or packages."""
+# Minimal isolated child bootstrap before extension/network imports. CPython's
+# built-in os/sys are safe here; no application directory is added to sys.path.
+import sys
+import os
+if __name__ == '__main__' and sys.platform == 'win32':
+    if not sys.flags.isolated or not sys.flags.no_site:
+        raise SystemExit(20)
+    for _name in tuple(os.environ):
+        if (_name.upper().startswith(('OPENSSL_', 'SSL_', 'PYTHON')) or
+                _name.upper() in {'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', '__PYVENV_LAUNCHER__'}):
+            os.environ.pop(_name, None)
+    import ctypes
+    _kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    _kernel.SetDefaultDllDirectories.argtypes = [ctypes.c_uint32]
+    _kernel.SetDefaultDllDirectories.restype = ctypes.c_int
+    if not _kernel.SetDefaultDllDirectories(0xA00):  # APPLICATION_DIR | SYSTEM32
+        raise SystemExit(20)
+
 import ast
 from contextlib import contextmanager
 import hashlib
@@ -15,12 +33,12 @@ import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import build_opener, HTTPRedirectHandler, Request
+from urllib.request import build_opener, HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request
 
 REPOSITORY = "mcann1423/windows-overlays"
 API = "https://api.github.com/repos/" + REPOSITORY
 RAW = "https://raw.githubusercontent.com/" + REPOSITORY
-FILES = ("overlay_updater.py", "clock_overlay_v3.py", "ip_overlay.py",
+FILES = ("overlay_updater.py", "overlay_windows.py", "overlay_appearance.py", "clock_overlay_v3.py", "ip_overlay.py",
          "cchl_cal_overlay.py", "ceel_cal_overlay.py", "README.md",
          "calendar_config.example.json")
 STATE = ".overlay-update.json"
@@ -50,6 +68,19 @@ class NoRedirect(HTTPRedirectHandler):
         raise UpdateError("GitHub redirected a download. Retry later or update manually.")
 
 
+def https_context():
+    import ssl
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    if sys.platform == 'win32':
+        # Explicit Windows certificate stores: never SSL_CERT_FILE/DIR or an
+        # OpenSSL default CA path from the inherited user environment.
+        for cert in windows_helper().machine_root_certificates():
+            context.load_verify_locations(cadata=ssl.DER_cert_to_PEM_cert(cert))
+    else:
+        context.load_default_certs()
+    return context
+
+
 def download(url, limit=MAX_FILE):
     valid_url(url)
     request = Request(url, headers={"User-Agent": "windows-overlays-updater",
@@ -57,7 +88,7 @@ def download(url, limit=MAX_FILE):
                                    "Accept-Encoding": "identity"})
     try:
         started = time.monotonic()
-        with build_opener(NoRedirect()).open(request, timeout=TIMEOUT) as response:
+        with build_opener(NoRedirect(), ProxyHandler({}), HTTPSHandler(context=https_context())).open(request, timeout=TIMEOUT) as response:
             valid_url(response.geturl())
             if response.geturl() != url or response.status != 200:
                 raise UpdateError("Unexpected GitHub download response.")
@@ -121,15 +152,17 @@ def validate_content(name, data):
 
 
 class FolderUpdater:
-    def __init__(self, directory):
+    def __init__(self, directory, guard=None):
         self.directory = Path(directory).resolve(strict=True)
         self.recovery_needed = False
+        self.guard = guard
 
     def path(self, name):
         # Names originate only in fixed constants, never remote paths.
         if name not in (*FILES, STATE, LOCK, BACKUPS):
             raise UpdateError("Unsafe update path.")
         path = self.directory / name
+        self.checked(path)
         for entry in self.directory.iterdir():
             if entry.name.rstrip(" .").casefold() == name.casefold() and entry.name != name:
                 raise UpdateError("Ambiguous local filename: " + name)
@@ -143,6 +176,40 @@ class FolderUpdater:
                 (name == BACKUPS and not stat.S_ISDIR(info.st_mode))):
             raise UpdateError("Unsafe local path (link or wrong file type): " + name)
         return path
+
+    def checked(self, path):
+        if self.guard is not None:
+            try:
+                self.guard.check_path(path)
+            except Exception:
+                raise UpdateError("Protected path trust changed or cannot be verified; stop and review installation permissions.") from None
+        return path
+
+    def temporary_directory(self, prefix, parent):
+        if self.guard is None:
+            return Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+        # Maintained Windows Python mkdir(mode=0o700), as used by tempfile, installs a
+        # user-specific DACL. Protected updates require inherited admin ACLs.
+        import secrets
+        for _ in range(10):
+            path = self.checked(parent / (prefix + secrets.token_hex(12)))
+            try:
+                path.mkdir(mode=0o777)
+            except FileExistsError:
+                continue
+            self.checked(path)
+            return path
+        raise UpdateError("Cannot allocate a unique protected staging directory.")
+
+    @contextmanager
+    def staging(self):
+        stage = self.temporary_directory('.overlay-update-stage-', self.directory)
+        try:
+            yield stage
+        finally:
+            if self.guard is not None:
+                self.guard.release_temporary(stage)
+            shutil.rmtree(stage)
 
     def snapshot(self):
         result = {}
@@ -161,11 +228,12 @@ class FolderUpdater:
         except FileExistsError:
             raise UpdateError("Another overlay update is running or was interrupted. See README lock/recovery steps.") from None
         os.close(fd)
+        self.checked(path)
         try:
             yield
         finally:
             if not self.recovery_needed:
-                path.unlink()
+                self.checked(path).unlink()
 
     def fetch(self):
         commit = decode_json(download(API + "/commits/main"))
@@ -230,31 +298,32 @@ class FolderUpdater:
         if not changed:
             return "Already up to date. No files changed."
         # Staging shares the target filesystem, so os.replace is per-file atomic.
-        with tempfile.TemporaryDirectory(prefix=".overlay-update-stage-", dir=self.directory) as temp:
-            stage = Path(temp)
+        with self.staging() as stage:
             for name in changed:
-                with (stage / name).open("wb") as file:
+                with self.checked(stage / name).open("wb") as file:
                     file.write(incoming[name])
                     file.flush()
                     os.fsync(file.fileno())
-                if (stage / name).read_bytes() != incoming[name]:
+                if self.checked(stage / name).read_bytes() != incoming[name]:
                     raise UpdateError("Staged file verification failed; nothing replaced.")
             if self.snapshot() != before:
                 raise UpdateError("Local files changed during download; nothing replaced. Retry when editing is finished.")
             backups = self.path(BACKUPS)
             backups.mkdir(exist_ok=True)
-            backup = Path(tempfile.mkdtemp(prefix=sha[:12] + "-", dir=backups))
+            self.checked(backups)
+            backup = self.temporary_directory(sha[:12] + "-", backups)
+            self.checked(backup)
             for name in changed:
                 if before[name] is not None:
-                    with (backup / name).open("wb") as file:
+                    with self.checked(backup / name).open("wb") as file:
                         file.write(before[name])
                         file.flush()
                         os.fsync(file.fileno())
-                    if (backup / name).read_bytes() != before[name]:
+                    if self.checked(backup / name).read_bytes() != before[name]:
                         raise UpdateError("Backup verification failed; nothing replaced.")
             journal = json.dumps({"replaced": changed,
                                   "previously_absent": [n for n in changed if before[n] is None]}, indent=2)
-            with (backup / "recovery.json").open("w", encoding="utf-8") as file:
+            with self.checked(backup / "recovery.json").open("w", encoding="utf-8") as file:
                 file.write(journal)
                 file.flush()
                 os.fsync(file.fileno())
@@ -264,7 +333,7 @@ class FolderUpdater:
             try:
                 # Metadata is last; it never describes a partially applied update.
                 for name in changed:
-                    os.replace(stage / name, self.path(name))
+                    os.replace(self.checked(stage / name), self.path(name))
                     replaced.append(name)
             except (OSError, UpdateError):
                 failed = []
@@ -274,7 +343,7 @@ class FolderUpdater:
                             self.path(name).unlink()
                         else:
                             restore = stage / name
-                            shutil.copyfile(backup / name, restore)
+                            shutil.copyfile(self.checked(backup / name), self.checked(restore))
                             os.replace(restore, self.path(name))
                     except (OSError, UpdateError):
                         failed.append(name)
@@ -287,10 +356,165 @@ class FolderUpdater:
                 (". First-use baseline recorded." if before[STATE] is None else "."))
 
 
+# Exit codes are the only cross-integrity result channel: no writable request,
+# command, target or result files. Detailed failures are displayed by the child.
+CHILD_FLAG = '--protected-update'
+CHILD_RESULTS = {
+    0: 'Updated successfully. Restart ALL overlays manually. Config/fonts untouched; backups are in .overlay-update-backups.',
+    10: 'Already up to date. No files changed.',
+}
+
+
+def windows_api():
+    import ctypes
+    from ctypes import wintypes as w
+
+    class ShellExecuteInfo(ctypes.Structure):
+        _fields_ = [('cbSize', w.DWORD), ('fMask', w.ULONG), ('hwnd', w.HWND),
+                    ('lpVerb', w.LPCWSTR), ('lpFile', w.LPCWSTR),
+                    ('lpParameters', w.LPCWSTR), ('lpDirectory', w.LPCWSTR),
+                    ('nShow', ctypes.c_int), ('hInstApp', w.HINSTANCE),
+                    ('lpIDList', ctypes.c_void_p), ('lpClass', w.LPCWSTR),
+                    ('hkeyClass', w.HKEY), ('dwHotKey', w.DWORD),
+                    ('hIcon', w.HANDLE), ('hProcess', w.HANDLE)]
+
+    shell = ctypes.WinDLL('shell32', use_last_error=True)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    shell.ShellExecuteExW.argtypes = [ctypes.POINTER(ShellExecuteInfo)]
+    shell.ShellExecuteExW.restype = w.BOOL
+    shell.IsUserAnAdmin.argtypes = []
+    shell.IsUserAnAdmin.restype = w.BOOL
+    kernel.WaitForSingleObject.argtypes = [w.HANDLE, w.DWORD]
+    kernel.WaitForSingleObject.restype = w.DWORD
+    kernel.GetExitCodeProcess.argtypes = [w.HANDLE, ctypes.POINTER(w.DWORD)]
+    kernel.GetExitCodeProcess.restype = w.BOOL
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.CloseHandle.restype = w.BOOL
+    return ctypes, w, ShellExecuteInfo, shell, kernel
+
+
+def is_admin():
+    return bool(windows_api()[3].IsUserAnAdmin())
+
+
+def child_parameters(script):
+    # -I removes CWD/script directory, user site, and PYTHON* environment influence.
+    # -S additionally disables system .pth/sitecustomize execution; -B avoids pyc.
+    import subprocess
+    return subprocess.list2cmdline(['-I', '-S', '-B', str(script), CHILD_FLAG])
+
+
+def run_elevated(script, interpreter):
+    c, w, info_type, shell, kernel = windows_api()
+    info = info_type()
+    info.cbSize = c.sizeof(info)
+    info.fMask = 0x40 | 0x100 | 0x400  # NOCLOSEPROCESS | NOASYNC | FLAG_NO_UI
+    info.lpVerb = 'runas'
+    info.lpFile = str(interpreter)
+    info.lpParameters = child_parameters(script)
+    info.lpDirectory = str(interpreter.parent)
+    info.nShow = 0
+    # Honored even with -I by CPython before our child bootstrap. ShellExecuteEx
+    # has no private environment block; refuse rather than mutate the GUI env.
+    if any(name in os.environ for name in ('PYTHONEXECUTABLE', '__PYVENV_LAUNCHER__')):
+        raise UpdateError('Python launcher environment overrides are unsupported for elevation. Restart with the standard all-users interpreter.')
+    if not shell.ShellExecuteExW(c.byref(info)):
+        if c.get_last_error() == 1223:
+            raise UpdateError('Administrator approval was cancelled. Nothing was installed.')
+        raise UpdateError('Windows could not start the updater with administrator approval. No retry was attempted.')
+    if not info.hProcess:
+        raise UpdateError('Windows did not return an updater process handle. Check for a running updater before retrying.')
+    try:
+        # Only on the existing non-daemon worker, never Tk's thread.
+        if kernel.WaitForSingleObject(info.hProcess, 0xFFFFFFFF) != 0:
+            raise UpdateError('Cannot observe the updater. Check for a running updater and retained lock before retrying.')
+        code = w.DWORD()
+        if not kernel.GetExitCodeProcess(info.hProcess, c.byref(code)):
+            raise UpdateError('Cannot read updater result. Inspect backups and lock before retrying.')
+        if code.value not in CHILD_RESULTS:
+            raise UpdateError('Administrator updater did not complete. See its error dialog; inspect backups and any retained lock before retrying. Do not restart overlays after incomplete rollback.')
+        return CHILD_RESULTS[code.value]
+    finally:
+        kernel.CloseHandle(info.hProcess)
+
+
+_windows_helper_module = None
+
+
+def windows_helper():
+    global _windows_helper_module
+    if _windows_helper_module is not None:
+        return _windows_helper_module
+    # Explicit file loading works under -I -S without adding application sys.path.
+    import importlib.util
+    path = Path(__file__).parent / 'overlay_windows.py'
+    spec = importlib.util.spec_from_file_location('_overlay_windows', path)
+    module = importlib.util.module_from_spec(spec)
+    # Load source only: never a timestamp-valid application __pycache__ file.
+    # The privileged parent has validated and guarded this source path.
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    _windows_helper_module = module
+    return module
+
+
+def protected_install(script, interpreter):
+    return windows_helper().ProtectedInstall(script, interpreter)
+
+
+def elevation_required(directory):
+    # Probe BEFORE lock/download/stage/replacement. Never escalate a failed
+    # transaction (especially a partial write or failed rollback).
+    try:
+        with tempfile.TemporaryFile(prefix='.overlay-write-probe-', dir=directory):
+            pass
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        raise UpdateError('Cannot test folder access. Check disk space and folder availability; no elevation attempted.') from None
+
+
+def elevated_main():
+    if (sys.platform != 'win32' or sys.argv[1:] != [CHILD_FLAG] or
+            not sys.flags.isolated or not sys.flags.no_site or not is_admin()):
+        return 20
+    try:
+        script = Path(os.path.abspath(__file__))
+        with protected_install(script, Path(sys.executable)) as guard:
+            guard.release_script()
+            message = FolderUpdater(script.parent, guard=guard).update()
+        return 10 if message.startswith('Already up to date') else 0
+    except Exception as error:
+        # No Tk/site imports in the privileged process. No calendar/config read.
+        import ctypes
+        from ctypes import wintypes as w
+        user = ctypes.WinDLL('user32', use_last_error=True)
+        user.MessageBoxW.argtypes = [w.HWND, w.LPCWSTR, w.LPCWSTR, w.UINT]
+        user.MessageBoxW.restype = ctypes.c_int
+        message = str(error) if isinstance(error, UpdateError) else 'Protected updater refused this installation or failed. Review permissions, backups and the retained lock. Do not restart overlays after incomplete rollback.'
+        user.MessageBoxW(None, message, 'Overlay updater', 0x10)
+        return 20
+
+
 def update_checkout(directory):
     if sys.platform != "win32":
         raise UpdateError("Overlay updates are supported on Windows only.")
-    return FolderUpdater(directory).update()
+    script = Path(os.path.abspath(__file__))
+    directory = Path(os.path.abspath(directory))
+    if directory != script.parent:
+        raise UpdateError("Updater must be beside the running overlays.")
+    if is_admin():
+        raise UpdateError("Close administrator overlays and launch normally. Only the dedicated updater child may run elevated.")
+    if not elevation_required(directory):
+        return FolderUpdater(directory).update()
+    try:
+        with protected_install(script, Path(sys.executable)) as guard:
+            guard.release_script()
+            return run_elevated(script, Path(sys.executable))
+    except UpdateError:
+        raise
+    except Exception:
+        raise UpdateError("Elevation refused: installation or Python trust checks failed. Use a protected all-users Python installation and administrator-managed application folder; see README. No automatic retry.") from None
 
 
 def attach_update_menu(root, script_file):
@@ -324,8 +548,8 @@ def attach_update_menu(root, script_file):
     def start():
         nonlocal busy
         if busy or not messagebox.askyesno(
-                "Overlay updates", "Download and replace the seven published application/documentation files? "
-                "All overlays share these files. First use has no baseline: existing code, including edits, may be replaced and backed up. Later edits block updates. Config/fonts/other files are untouched. Restart all overlays manually afterward.", parent=root):
+                "Overlay updates", "Download and replace the nine published application/documentation files? "
+                "All overlays share these files. First use has no baseline: existing code, including edits, may be replaced and backed up. Later edits block updates. Config/fonts/other files are untouched. Restart all overlays manually afterward. If this folder is protected, Windows will ask for administrator approval for the updater only; overlays stay non-administrator.", parent=root):
             return
         busy = True
         menu.entryconfigure(0, state="disabled", label="Checking for updates…")
@@ -342,3 +566,7 @@ def attach_update_menu(root, script_file):
     menu.add_command(label="Check for updates…", command=start)
     root.bind("<Button-3>", popup, add="+")
     return menu
+
+
+if __name__ == "__main__":
+    raise SystemExit(elevated_main())

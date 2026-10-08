@@ -2,6 +2,7 @@ import socket
 import sys
 import tkinter as tk
 from overlay_updater import attach_update_menu
+from overlay_appearance import Appearance, fit_single_line, place_within_screen
 import tkinter.font as tkfont
 
 
@@ -141,24 +142,20 @@ def redraw_ip(ip_str):
   )
 
 
-# Measure longest potential IP string bounds to calculate window geometry
-measure_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE, weight="bold")
-sample_ip = "255.255.255.255"
-window_w = measure_font.measure(sample_ip) + (OUTLINE_WEIGHT * 4) + 40
-window_h = measure_font.metrics("linespace") + (OUTLINE_WEIGHT * 4) + 20
+def apply_appearance(settings, initial=False):
+  global FONT_SIZE, window_w, window_h
+  FONT_SIZE, width, height = fit_single_line(root, FONT_FAMILY, settings["font_size"],
+      "255.255.255.255", (OUTLINE_WEIGHT * 4 + 40, OUTLINE_WEIGHT * 4 + 20), "bold")
+  position = None
+  if initial:
+    position = (root.winfo_screenwidth() - width - CORNER_MARGIN,
+                root.winfo_screenheight() - height - CORNER_MARGIN)
+  window_w, window_h = place_within_screen(root, width, height, position)
+  redraw_ip(current_ip_str)
 
-# Calculate lower-right corner placement
-screen_w = root.winfo_screenwidth()
-screen_h = root.winfo_screenheight()
 
-pos_x = screen_w - window_w - CORNER_MARGIN
-pos_y = screen_h - window_h - CORNER_MARGIN
-
-# Position and size window
-root.geometry(f"{window_w}x{window_h}+{pos_x}+{pos_y}")
-
-# Force window layout update BEFORE executing the first canvas render pass
-root.update()
+appearance = Appearance(root, update_menu, __file__, 72, apply_appearance)
+apply_appearance(appearance.settings, initial=True)
 
 
 def update_ip():
