@@ -274,9 +274,9 @@ def redraw_calendar(full_text):
     h = window_h
 
   # The fixed 20px inset covers every allowed stroke (0–5px) without rewrap.
-  cx = 20  # Left padding
+  cx = 15  # Left padding
   cy = 20  # Top padding
-  wrap_pixel_width = max(1, w - 40)  # Constrains text wrapping inside overlay width
+  wrap_pixel_width = max(1, w - 30)  # Constrains text wrapping inside overlay width
 
   r = OUTLINE_WEIGHT
   if r > 0:
